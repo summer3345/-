@@ -341,6 +341,11 @@
         return u + '/v1/chat/completions';
     }
 
+    /* models 列表端点：与 normalizeUrl 同源推导 */
+    function modelsUrl(url) {
+        return normalizeUrl(url).replace(/\/chat\/completions$/, '/models');
+    }
+
     function activeProfile() {
         var api = settings().api;
         if (api.activeIndex < 0 || api.activeIndex >= api.profiles.length) return null;
@@ -465,7 +470,11 @@
         '        <input type="text" id="xyh_api_name" placeholder="方案名（如：我的Gemini / 某中转）">' +
         '        <input type="text" id="xyh_api_url" placeholder="API 地址（贴到 /v1 即可，自动补全）">' +
         '        <input type="text" id="xyh_api_key" placeholder="API Key">' +
-        '        <input type="text" id="xyh_api_model" placeholder="模型名（如 gemini-2.5-flash / claude-haiku-4-5）">' +
+        '        <div class="xyh-inline" style="gap:6px;margin-bottom:8px;">' +
+        '          <input type="text" id="xyh_api_model" placeholder="模型名（点右边拉取，或手填）" style="flex:1;margin-bottom:0;">' +
+        '          <button id="xyh_api_fetch_models" class="menu_button" style="white-space:nowrap;">拉取模型</button>' +
+        '        </div>' +
+        '        <select id="xyh_api_model_sel" style="display:none;width:100%;box-sizing:border-box;margin-bottom:8px;"></select>' +
         '        <div class="xyh-form-btns">' +
         '          <button id="xyh_api_save" class="menu_button">保存方案</button>' +
         '          <button id="xyh_api_test" class="menu_button">测试连接</button>' +
@@ -573,6 +582,7 @@
         $('#xyh_api_url').val(prof ? prof.url : '');
         $('#xyh_api_key').val(prof ? prof.key : '');
         $('#xyh_api_model').val(prof ? prof.model : '');
+        $('#xyh_api_model_sel').hide().empty();
     }
 
     function bindApiUI() {
@@ -617,6 +627,40 @@
             api.activeIndex = api.profiles.length ? 0 : -1;
             save();
             renderApiUI();
+        });
+        $('#xyh_api_fetch_models').on('click', function () {
+            var url = $('#xyh_api_url').val();
+            var key = $('#xyh_api_key').val();
+            if (!url) { toast('先填 API 地址'); return; }
+            toast('拉取模型中……');
+            fetch(modelsUrl(url), {
+                method: 'GET',
+                headers: { 'Authorization': 'Bearer ' + (key || '') }
+            }).then(function (res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            }).then(function (data) {
+                var list = (data && data.data) || [];
+                var ids = [];
+                for (var i = 0; i < list.length; i++) {
+                    if (list[i] && list[i].id) ids.push(String(list[i].id));
+                }
+                if (!ids.length) { toast('这个站没报出模型，手填吧'); return; }
+                ids.sort();
+                var sel = $('#xyh_api_model_sel');
+                sel.empty().append('<option value="">— 选一个模型（共 ' + ids.length + ' 个）—</option>');
+                for (var j = 0; j < ids.length; j++) {
+                    sel.append($('<option></option>').attr('value', ids[j]).text(ids[j]));
+                }
+                sel.show();
+                toast('✅ 拉到 ' + ids.length + ' 个模型');
+            }, function (err) {
+                toast('❌ 拉取失败：' + err.message + '（这个站可能不开 /models，手填吧）');
+            });
+        });
+        $('#xyh_api_model_sel').on('change', function () {
+            var v = $(this).val();
+            if (v) $('#xyh_api_model').val(v);
         });
         $('#xyh_api_test').on('click', function () {
             var prof = {
@@ -953,7 +997,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.2.0 点灯');
+        console.log('[Luciole] v1.2.1 点灯');
     }
 
     jQuery(function () {
