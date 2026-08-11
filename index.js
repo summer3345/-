@@ -997,7 +997,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.2.1 点灯');
+        console.log('[Luciole] v1.2.2 点灯');
     }
 
     jQuery(function () {
