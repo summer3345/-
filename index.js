@@ -849,12 +849,13 @@
             'width:40px;height:40px;' +
             'border-radius:50%;z-index:30000;cursor:pointer;touch-action:none;' +
             'display:flex;align-items:center;justify-content:center;' +
-            'background:rgba(30,30,30,0.75);border:1px solid rgba(255,215,106,0.7);' +
-            'box-shadow:0 2px 10px rgba(0,0,0,0.35);'
+            'background:radial-gradient(circle,rgba(205,230,128,0.12) 0%,rgba(118,180,139,0.04) 45%,transparent 72%);' +
+            'border:0;box-shadow:none;isolation:isolate;user-select:none;-webkit-tap-highlight-color:transparent;'
         );
-        el.append($('<span></span>').attr('style',
-            'display:inline-block;width:13px;height:13px;border-radius:50%;' +
-            'background:#ffd76a;box-shadow:0 0 8px 3px rgba(255,215,106,0.6);'
+        el.append($('<span class="xyh-floater-firefly" aria-hidden="true"></span>').attr('style',
+            'display:block;position:relative;width:18px;height:18px;border-radius:50%;pointer-events:none;' +
+            'background:radial-gradient(circle at 38% 32%,rgba(255,255,245,1) 0%,rgba(255,250,190,0.98) 18%,rgba(248,220,105,0.92) 38%,rgba(215,229,124,0.62) 57%,rgba(131,187,142,0.24) 75%,rgba(84,144,129,0) 100%);' +
+            'box-shadow:0 1px 2px rgba(30,50,42,0.30),0 0 4px 1px rgba(255,241,148,0.76),0 0 11px 4px rgba(218,231,126,0.40),0 0 24px 8px rgba(98,168,137,0.16);'
         ));
         host.append(el);
         console.log('[Luciole] 浮标已挂载于 ' + (host.attr('id') || 'body'));
@@ -997,7 +998,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.2.2 点灯');
+        console.log('[Luciole] v1.2.3 点灯');
     }
 
     jQuery(function () {

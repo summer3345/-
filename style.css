@@ -32,19 +32,86 @@
     position: fixed;
     right: 12px;
     bottom: 140px;
-    width: 38px;
-    height: 38px;
+    width: 40px;
+    height: 40px;
     border-radius: 50%;
-    background: var(--SmartThemeBlurTintColor, rgba(20, 20, 20, 0.85));
-    border: 1px solid var(--SmartThemeBorderColor, #555);
+    background: radial-gradient(circle, rgba(205, 230, 128, 0.12) 0%, rgba(118, 180, 139, 0.04) 45%, transparent 72%);
+    border: 0;
+    box-shadow: none;
     z-index: 30000;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
     touch-action: none;
+    isolation: isolate;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
 }
-.xyh-floater-dot { width: 12px; height: 12px; margin: 0; }
+.xyh-floater::before {
+    content: "";
+    position: absolute;
+    inset: 5px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 247, 169, 0.54) 0%, rgba(224, 232, 125, 0.30) 34%, rgba(107, 176, 140, 0.10) 62%, transparent 78%);
+    filter: blur(5px);
+    opacity: 0.68;
+    pointer-events: none;
+    animation: xyh-firefly-halo 3.8s ease-in-out infinite;
+}
+.xyh-floater-firefly {
+    display: block;
+    position: relative;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 32%,
+        rgba(255, 255, 245, 1) 0%,
+        rgba(255, 250, 190, 0.98) 18%,
+        rgba(248, 220, 105, 0.92) 38%,
+        rgba(215, 229, 124, 0.62) 57%,
+        rgba(131, 187, 142, 0.24) 75%,
+        rgba(84, 144, 129, 0) 100%);
+    box-shadow:
+        0 1px 2px rgba(30, 50, 42, 0.30),
+        0 0 4px 1px rgba(255, 241, 148, 0.76),
+        0 0 11px 4px rgba(218, 231, 126, 0.40),
+        0 0 24px 8px rgba(98, 168, 137, 0.16);
+    pointer-events: none;
+    z-index: 1;
+    will-change: transform, opacity;
+    animation: xyh-firefly-core 3.8s ease-in-out infinite;
+}
+.xyh-floater-firefly::after {
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 4px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: rgba(255, 255, 244, 0.92);
+    filter: blur(0.5px);
+}
+@keyframes xyh-firefly-core {
+    0%, 100% { transform: scale(0.86); opacity: 0.78; }
+    43% { transform: scale(1.06); opacity: 1; }
+    69% { transform: scale(0.97); opacity: 0.91; }
+}
+@keyframes xyh-firefly-halo {
+    0%, 100% { transform: scale(0.82); opacity: 0.36; }
+    46% { transform: scale(1.12); opacity: 0.78; }
+    72% { transform: scale(0.96); opacity: 0.58; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .xyh-floater::before,
+    .xyh-floater-firefly {
+        animation: none;
+        opacity: 0.92;
+    }
+}
 
 /* ---- 面板 ---- */
 .xyh-panel {
