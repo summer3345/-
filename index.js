@@ -22,6 +22,7 @@
             enabled: true,
             depth: 2,
             judge: false,
+            showFloater: true,
             api: {
                 mode: 'current',      // current = 跟随酒馆当前连接 / custom = 独立 API
                 activeIndex: -1,
@@ -42,6 +43,7 @@
         if (!s.depth) s.depth = 2;
         if (!s.api) s.api = defaults().api;
         if (!s.api.profiles) s.api.profiles = [];
+        if (typeof s.showFloater !== 'boolean') s.showFloater = true;
         return s;
     }
 
@@ -759,6 +761,7 @@
     function makeFloater() {
         var el = $('<div id="xyh_floater" class="xyh-floater" title="Luciole"><span class="xyh-dot xyh-dot-lit xyh-floater-dot"></span></div>');
         $('body').append(el);
+        if (!settings().showFloater) el.hide();
         var dragging = false, moved = false, ox = 0, oy = 0;
 
         function start(x, y) {
@@ -792,6 +795,37 @@
         el.on('touchend', end);
     }
 
+    /* 抽屉入口：挂进扩展程序面板，跟其他插件排排坐 */
+    function makeDrawer() {
+        var html = '' +
+        '<div id="xyh_drawer" class="inline-drawer">' +
+        '  <div class="inline-drawer-toggle inline-drawer-header">' +
+        '    <b>🌟 Luciole</b>' +
+        '    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>' +
+        '  </div>' +
+        '  <div class="inline-drawer-content">' +
+        '    <div class="xyh-drawer-inner">' +
+        '      <button id="xyh_open_from_drawer" class="menu_button">打开 Luciole 面板</button>' +
+        '      <label class="checkbox_label"><input type="checkbox" id="xyh_show_floater"> 显示浮标（可停避风塘）</label>' +
+        '    </div>' +
+        '  </div>' +
+        '</div>';
+        var target = $('#extensions_settings2');
+        if (!target.length) target = $('#extensions_settings');
+        if (!target.length) return;
+        target.append(html);
+        $('#xyh_open_from_drawer').on('click', function () {
+            $('#xyh_panel').show();
+            refreshPanel();
+        });
+        $('#xyh_show_floater').prop('checked', settings().showFloater).on('change', function () {
+            var s = settings();
+            s.showFloater = $(this).prop('checked');
+            save();
+            $('#xyh_floater').toggle(s.showFloater);
+        });
+    }
+
     /* ---------------- 事件接线 ---------------- */
 
     function onUserMessage() {
@@ -818,14 +852,21 @@
     }
 
     function init() {
+        console.log('[Luciole] init 开始');
         var c;
-        try { c = ctx(); } catch (e) { return; }
-        $('body').append(panelHtml());
-        makeFloater();
-        bindPanel();
-        refreshPanel();
-        reconcile();
-        updateInjection();
+        try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
+        try {
+            $('body').append(panelHtml());
+            makeFloater();
+            makeDrawer();
+            bindPanel();
+            refreshPanel();
+            reconcile();
+            updateInjection();
+        } catch (e) {
+            console.log('[Luciole] init 出错：', e && e.message, e);
+            return;
+        }
 
         var ev = c.eventSource;
         var t = c.eventTypes;
@@ -839,7 +880,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.1.0 点灯');
+        console.log('[Luciole] v1.1.1 点灯');
     }
 
     jQuery(function () {
