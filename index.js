@@ -760,8 +760,14 @@
     /* 浮标：可拖动，可停避风塘 */
     function makeFloater() {
         var el = $('<div id="xyh_floater" class="xyh-floater" title="Luciole"></div>');
+        var host = $('#sheld');
+        var posStyle = host.length
+            ? 'position:absolute;right:10px;bottom:90px;'
+            : 'position:fixed;right:12px;bottom:140px;';
+        if (!host.length) host = $('body');
         el.attr('style',
-            'position:fixed;right:12px;bottom:140px;width:40px;height:40px;' +
+            posStyle +
+            'width:40px;height:40px;' +
             'border-radius:50%;z-index:30000;cursor:pointer;touch-action:none;' +
             'display:flex;align-items:center;justify-content:center;' +
             'background:rgba(30,30,30,0.75);border:1px solid rgba(255,215,106,0.7);' +
@@ -771,8 +777,8 @@
             'display:inline-block;width:13px;height:13px;border-radius:50%;' +
             'background:#ffd76a;box-shadow:0 0 8px 3px rgba(255,215,106,0.6);'
         ));
-        $('body').append(el);
-        console.log('[Luciole] 浮标已挂载');
+        host.append(el);
+        console.log('[Luciole] 浮标已挂载于 ' + (host.attr('id') || 'body'));
         if (!settings().showFloater) el.hide();
         var dragging = false, moved = false, ox = 0, oy = 0;
 
@@ -805,6 +811,24 @@
             var t = e.originalEvent.touches[0]; move(t.pageX, t.pageY); e.preventDefault();
         });
         el.on('touchend', end);
+    }
+
+    /* 法杖菜单入口：输入框旁的扩展菜单，ST 官方入口，全平台保显示 */
+    function makeWandEntry() {
+        var menu = $('#extensionsMenu');
+        if (!menu.length) { console.log('[Luciole] 未找到法杖菜单'); return; }
+        var item = $('' +
+            '<div id="xyh_wand" class="list-group-item flex-container flexGap5 interactable" tabindex="0">' +
+            '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;' +
+            'background:#ffd76a;box-shadow:0 0 6px 2px rgba(255,215,106,0.5);"></span>' +
+            '<span>Luciole</span>' +
+            '</div>');
+        item.on('click', function () {
+            $('#xyh_panel').show();
+            refreshPanel();
+        });
+        menu.append(item);
+        console.log('[Luciole] 法杖菜单入口已挂载');
     }
 
     /* 抽屉入口：挂进扩展程序面板，跟其他插件排排坐 */
@@ -871,6 +895,7 @@
             $('body').append(panelHtml());
             makeFloater();
             makeDrawer();
+            makeWandEntry();
             bindPanel();
             refreshPanel();
             reconcile();
@@ -892,7 +917,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.1.2 点灯');
+        console.log('[Luciole] v1.1.3 点灯');
     }
 
     jQuery(function () {
