@@ -1063,3 +1063,16 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
 
 .xyh-panel.xyh-light .xyh-form { border-top-color: var(--xyh-line); }
 .xyh-panel.xyh-light .xyh-empty { color: var(--xyh-muted); opacity: 1; }
+
+/* ---- v1.4.0 编剧模式 ---- */
+.xyh-mode-row label { display: flex; align-items: center; gap: 5px; }
+.xyh-mode-row small { opacity: 0.55; }
+.xyh-mode-badge {
+    font-size: 0.72em;
+    opacity: 0.65;
+    border: 1px solid currentColor;
+    border-radius: 10px;
+    padding: 0 6px;
+    margin-left: 6px;
+    vertical-align: middle;
+}

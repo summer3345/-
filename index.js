@@ -1,5 +1,5 @@
 /* ============================================================
- * 小萤火 v1.3.1 — 叙事节奏控制器
+ * 小萤火 v1.4.0 — 叙事节奏控制器 · 迷雾引路灯
  * 把长线从模型手里收走：机器管节奏，模型管演技。
  * 纪律：ES5 全程；零全局补丁；只用官方 SillyTavern API。
  * v1.1.0：判读 API 方案制（跟随酒馆 / 独立 URL+Key+模型，多方案保存切换）；
@@ -138,8 +138,10 @@
     function newLadderFromForm(form) {
         return {
             id: 'xyh_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+            mode: form.mode === 'script' ? 'script' : 'field',
             title: form.title || '未命名的线',
             secret: form.secret || '',
+            arc: form.arc || '',
             gap: Math.max(1, parseInt(form.gap, 10) || 6),
             paused: false,
             frags: form.frags,
@@ -191,13 +193,23 @@
         for (var i = 0; i < st.ladders.length; i++) {
             var lad = st.ladders[i];
 
-            /* 一、倒带：掉落楼层戳比当前楼还靠后 = 那次掉落已被删进未来，撤回 */
-            for (var j = 0; j < lad.frags.length; j++) {
-                var f = lad.frags[j];
-                if (f.state >= 1 && f.dropFloor > floor) {
-                    f.state = 0;
-                    f.dropFloor = -1;
-                    changed = true;
+            /* 一、倒带：掉落楼层戳比当前楼还靠后 = 那次掉落已被删进未来，撤回
+             * 耕田线：归零回待掉；编剧线：光是现场生成的，长在被删掉的那一刻里，直接删除 */
+            if (lad.mode === 'script') {
+                for (var j2 = lad.frags.length - 1; j2 >= 0; j2--) {
+                    if (lad.frags[j2].dropFloor > floor) {
+                        lad.frags.splice(j2, 1);
+                        changed = true;
+                    }
+                }
+            } else {
+                for (var j = 0; j < lad.frags.length; j++) {
+                    var f = lad.frags[j];
+                    if (f.state >= 1 && f.dropFloor > floor) {
+                        f.state = 0;
+                        f.dropFloor = -1;
+                        changed = true;
+                    }
                 }
             }
 
@@ -263,6 +275,7 @@
 
     function tryDropLadder(lad, floor) {
         if (lad.paused) return Promise.resolve();
+        if (lad.mode === 'script') return tryDropScript(lad, floor);
         if (lad.cursor >= lad.frags.length) return Promise.resolve();
 
         /* 闸门一：上一颗必须落地 */
@@ -284,6 +297,75 @@
             if (verdict !== '等') dropFrag(lad, frag, floor);
         }, function () {
             dropFrag(lad, frag, floor);
+        });
+    }
+
+    /* ============ 编剧模式（v1.4 档二）============
+     * user 交脉络，萤火消化后看着戏走，自己决定每一程光落在哪、是什么。
+     * 与耕田相反：API 失败时关闸不掉（fail-closed）——宁可不放光，不放瞎光。 */
+
+    function tryDropScript(lad, floor) {
+        /* 闸门一：上一程光必须落地 */
+        var last = lad.frags.length ? lad.frags[lad.frags.length - 1] : null;
+        if (last && last.state === 1) return Promise.resolve();
+        /* 闸门二：楼距地板 */
+        if (lad.lastDropFloor >= 0 && (floor - lad.lastDropFloor) < lad.gap) return Promise.resolve();
+        /* 闸门三：脉络为空不放 */
+        if (!lad.arc) return Promise.resolve();
+
+        return askFirefly(lad).then(function (clue) {
+            if (clue) dropScriptClue(lad, clue, floor);
+        }, function () { /* fail-closed：这一轮不放 */ });
+    }
+
+    function dropScriptClue(lad, clue, floor) {
+        lad.frags.push({
+            text: clue, land: '', pre: '', must: false,
+            state: 1, dropFloor: floor
+        });
+        lad.cursor = lad.frags.length;
+        lad.lastDropFloor = floor;
+        toast('🕯️ 小萤火：「' + lad.title + '」放下了一程光');
+    }
+
+    /* 棋眼：萤火的引路 prompt（出厂默认版，待与江打磨） */
+    function fireflyPrompt(lad) {
+        var st = store();
+        var dropped = [];
+        for (var i = 0; i < lad.frags.length; i++) {
+            dropped.push('- 第' + lad.frags[i].dropFloor + '楼：' + lad.frags[i].text);
+        }
+        return [
+            '你是「小萤火」——悬在这场戏上空的引路灯。你手里握着一条只有你知道的剧情脉络，你的工作是在合适的时刻放下一程光：一条让剧情向脉络悄悄推进一步的具体线索。',
+            '【剧情脉络（绝密，任何情况下不得直接说破）】',
+            lad.arc,
+            '【已放出的光（按顺序）】',
+            dropped.length ? dropped.join('\n') : '（还没放过，这将是第一程）',
+            '【角色设定】', charCardText() || '（无）',
+            '【用户人设】', personaText() || '（无）',
+            '【世界观要点】', (st && st.worldNote) || '（无）',
+            '【近期摘要】', summaryText().slice(0, 1500) || '（无）',
+            '【最近两楼正文】', eventText(2).slice(0, 3000) || '（无）',
+            '现在判断：此刻是否适合放下一程光？',
+            '- 若当前戏剧节奏正紧（激烈冲突、亲密高潮、情绪尚未落地），或上一程光的余波还没被剧情消化，只输出一个字：等',
+            '- 若适合，输出一条线索指令：一到两句话，描述本轮剧情中应自然浮现的具体迹象——一个动作、一处细节、一句只言片语、一件物证。要求：',
+            '  1. 漏，非撬——只给迹象，不给解释，绝不直接说破脉络中的真相',
+            '  2. 必须比已放出的光更深一分，绝不重复已放过的内容',
+            '  3. 必须长在当前的戏里——与最近正文的场景、人物状态自然衔接，不得凭空空降',
+            '  4. 具体可演，不要抽象概括',
+            '只输出「等」或线索本身。不要引号，不要解释，不要编号。'
+        ].join('\n');
+    }
+
+    function askFirefly(lad) {
+        var prompt = fireflyPrompt(lad);
+        var call = (settings().api.mode === 'custom') ? callCustomApi(prompt) : callCurrentApi(prompt);
+        return call.then(function (res) {
+            var t = String(res || '').replace(/^\s+|\s+$/g, '');
+            t = t.replace(/^["'`「『]+|["'`」』]+$/g, '');
+            if (!t || t.length < 4) return '';
+            if (/^等/.test(t) && t.length <= 6) return '';
+            return t.slice(0, 300);
         });
     }
 
@@ -494,10 +576,15 @@
         '    <div id="xyh_ladders" class="xyh-ladders"></div>' +
         '    <div class="xyh-form xyh-card">' +
         '      <div class="xyh-section-head"><span class="xyh-section-title" id="xyh_form_title">种一条新线</span><small>让秘密一颗颗落地</small></div>' +
+        '      <div class="xyh-toggles xyh-mode-row" id="xyh_f_mode_row">' +
+        '        <label><input type="radio" name="xyh_f_mode" value="field" checked> 耕田 <small>碎片自己写，萤火管节奏</small></label>' +
+        '        <label><input type="radio" name="xyh_f_mode" value="script"> 编剧 <small>脉络交给萤火，光由她放</small></label>' +
+        '      </div>' +
         '      <input type="text" id="xyh_f_title" placeholder="这条线叫什么（如：女主的阵营秘密）">' +
         '      <input type="text" id="xyh_f_secret" placeholder="终点备注：真相是什么（只有你看得见，永不注入）">' +
         '      <label class="xyh-inline xyh-gap-control"><span>最少隔几楼掉一颗</span><input type="number" id="xyh_f_gap" value="6" min="1" class="xyh-num"></label>' +
         '      <textarea id="xyh_f_frags" rows="6" placeholder="一行一颗碎片，从早到晚排。格式：\n碎片内容 | 落地关键词(可空) | 前置关键词(可空) | 必\n\n例：\n她听到赤霄会三个字时有一瞬间的停顿 | 停顿,愣 | |\n她深夜发出过一条没头没尾的讯息 | 讯息,消息 | 停顿 |\n她与灰衣人在巷口碰面被目击 | 灰衣,巷口 | | 必"></textarea>' +
+        '      <textarea id="xyh_f_arc" rows="6" style="display:none;" placeholder="把剧情脉络交给萤火（绝密，永不注入正文）。写清：底牌是什么、大致要经过哪几步、最终走向哪里。\n\n例：\n她其实是赤霄会安插的卧底，潜伏是为了查清哥哥的死。中段她的身份要经历一次险些暴露的危机，她会开始动摇。最终在雪夜由她自己选择摊牌。\n\n萤火会消化这条脉络，看着戏走，自己决定每一程光落在哪里。编剧模式需要配好判读 API。"></textarea>' +
         '      <div class="xyh-form-btns xyh-plant-actions">' +
         '        <button type="button" id="xyh_f_save" class="menu_button xyh-action-primary">种下</button>' +
         '        <button type="button" id="xyh_f_cancel" class="menu_button xyh-action-secondary" style="display:none;">取消编辑</button>' +
@@ -533,18 +620,23 @@
             var done = 0;
             for (var j = 0; j < lad.frags.length; j++) if (lad.frags[j].state === 2) done++;
             var floating = (lad.cursor > 0 && lad.frags[lad.cursor - 1] && lad.frags[lad.cursor - 1].state === 1);
+            var isScript = lad.mode === 'script';
             html += '<div class="xyh-ladder' + (lad.paused ? ' xyh-paused' : '') + '" data-id="' + lad.id + '">' +
                 '<div class="xyh-ladder-top">' +
-                '  <span class="xyh-ladder-name">' + esc(lad.title) + '</span>' +
+                '  <span class="xyh-ladder-name">' + (isScript ? '🕯️ ' : '') + esc(lad.title) +
+                '  <small class="xyh-mode-badge">' + (isScript ? '编剧' : '耕田') + '</small></span>' +
                 fireflyRow(lad) +
                 '</div>' +
-                '<div class="xyh-ladder-meta">' + done + '/' + lad.frags.length + ' 已落地' +
-                (floating ? ' · 有一颗飘着' : '') +
+                '<div class="xyh-ladder-meta">' +
+                (isScript
+                    ? ('已放 ' + lad.frags.length + ' 程光 · ' + done + ' 程落地')
+                    : (done + '/' + lad.frags.length + ' 已落地')) +
+                (floating ? (isScript ? ' · 有一程飘着' : ' · 有一颗飘着') : '') +
                 (lad.paused ? ' · 已暂停' : '') +
                 ' · 楼距 ' + lad.gap + '</div>' +
                 '<div class="xyh-ladder-btns">' +
-                '  <span class="xyh-btn" data-act="drop">手动掉一颗</span>' +
-                '  <span class="xyh-btn" data-act="back">回退一格</span>' +
+                '  <span class="xyh-btn" data-act="drop">' + (isScript ? '现在放一程光' : '手动掉一颗') + '</span>' +
+                '  <span class="xyh-btn" data-act="back">' + (isScript ? '收回上程光' : '回退一格') + '</span>' +
                 '  <span class="xyh-btn" data-act="land">标记落地</span>' +
                 '  <span class="xyh-btn" data-act="pause">' + (lad.paused ? '继续' : '暂停') + '</span>' +
                 '  <span class="xyh-btn" data-act="edit">编辑</span>' +
@@ -747,11 +839,21 @@
         bindApiUI();
 
         $('#xyh_f_save').on('click', function () {
-            var frags = parseFragLines($('#xyh_f_frags').val());
-            if (!frags.length) { toast('至少种一颗碎片'); return; }
+            var mode = $('input[name="xyh_f_mode"]:checked').val() || 'field';
+            var frags = [];
+            var arc = '';
+            if (mode === 'script') {
+                arc = $('#xyh_f_arc').val().replace(/^\s+|\s+$/g, '');
+                if (!arc) { toast('编剧模式要先把脉络交给萤火'); return; }
+            } else {
+                frags = parseFragLines($('#xyh_f_frags').val());
+                if (!frags.length) { toast('至少种一颗碎片'); return; }
+            }
             var form = {
+                mode: mode,
                 title: $('#xyh_f_title').val(),
                 secret: $('#xyh_f_secret').val(),
+                arc: arc,
                 gap: $('#xyh_f_gap').val(),
                 frags: frags
             };
@@ -763,29 +865,42 @@
                     lad.title = form.title || lad.title;
                     lad.secret = form.secret;
                     lad.gap = Math.max(1, parseInt(form.gap, 10) || lad.gap);
-                    for (var i = 0; i < frags.length; i++) {
-                        if (lad.frags[i]) {
-                            frags[i].state = lad.frags[i].state;
-                            frags[i].dropFloor = lad.frags[i].dropFloor;
+                    if (lad.mode === 'script') {
+                        lad.arc = arc || lad.arc;
+                        /* 编剧线：已放出的光是台账，编辑脉络不动它 */
+                    } else {
+                        for (var i = 0; i < frags.length; i++) {
+                            if (lad.frags[i]) {
+                                frags[i].state = lad.frags[i].state;
+                                frags[i].dropFloor = lad.frags[i].dropFloor;
+                            }
                         }
+                        lad.frags = frags;
+                        if (lad.cursor > frags.length) lad.cursor = frags.length;
                     }
-                    lad.frags = frags;
-                    if (lad.cursor > frags.length) lad.cursor = frags.length;
                 }
                 editingId = null;
                 $('#xyh_f_cancel').hide();
+                $('#xyh_f_mode_row input').prop('disabled', false);
                 $('#xyh_form_title').text('种一条新线');
             } else {
                 st.ladders.push(newLadderFromForm(form));
             }
             $('#xyh_f_title').val(''); $('#xyh_f_secret').val('');
-            $('#xyh_f_frags').val(''); $('#xyh_f_gap').val('6');
+            $('#xyh_f_frags').val(''); $('#xyh_f_arc').val(''); $('#xyh_f_gap').val('6');
             save(); reconcile(); renderLadders(); updateInjection();
+        });
+
+        $('input[name="xyh_f_mode"]').on('change', function () {
+            var m = $('input[name="xyh_f_mode"]:checked').val();
+            $('#xyh_f_frags').toggle(m !== 'script');
+            $('#xyh_f_arc').toggle(m === 'script');
         });
 
         $('#xyh_f_cancel').on('click', function () {
             editingId = null;
             $(this).hide();
+            $('#xyh_f_mode_row input').prop('disabled', false);
             $('#xyh_form_title').text('种一条新线');
             $('#xyh_f_title').val(''); $('#xyh_f_secret').val('');
             $('#xyh_f_frags').val(''); $('#xyh_f_gap').val('6');
@@ -799,11 +914,29 @@
             if (!lad || !st) return;
 
             if (act === 'drop') {
+                if (lad.mode === 'script') {
+                    if (!lad.arc) { toast('这条线还没有脉络'); return; }
+                    toast('🕯️ 萤火看戏中……');
+                    askFirefly(lad).then(function (clue) {
+                        if (clue) dropScriptClue(lad, clue, floorNow());
+                        else toast('萤火说：等——此刻不宜放光');
+                        save(); renderLadders(); updateInjection();
+                    }, function (err) {
+                        toast('❌ 萤火没飞起来：' + (err && err.message ? err.message : 'API 未通'));
+                    });
+                    return; /* 异步分支自己收尾 */
+                }
                 if (lad.cursor < lad.frags.length) {
                     dropFrag(lad, lad.frags[lad.cursor], floorNow());
                 }
             } else if (act === 'back') {
-                if (lad.cursor > 0) {
+                if (lad.mode === 'script') {
+                    if (lad.frags.length) {
+                        lad.frags.pop();
+                        lad.cursor = lad.frags.length;
+                        lad.lastDropFloor = lad.frags.length ? lad.frags[lad.frags.length - 1].dropFloor : -1;
+                    }
+                } else if (lad.cursor > 0) {
                     lad.cursor -= 1;
                     var f = lad.frags[lad.cursor];
                     f.state = 0; f.dropFloor = -1;
@@ -816,10 +949,16 @@
                 lad.paused = !lad.paused;
             } else if (act === 'edit') {
                 editingId = lad.id;
+                var isScript = lad.mode === 'script';
+                $('input[name="xyh_f_mode"][value="' + (isScript ? 'script' : 'field') + '"]').prop('checked', true);
+                $('#xyh_f_mode_row input').prop('disabled', true);
+                $('#xyh_f_frags').toggle(!isScript);
+                $('#xyh_f_arc').toggle(isScript);
                 $('#xyh_f_title').val(lad.title);
                 $('#xyh_f_secret').val(lad.secret);
                 $('#xyh_f_gap').val(lad.gap);
-                $('#xyh_f_frags').val(fragsToLines(lad.frags));
+                if (isScript) $('#xyh_f_arc').val(lad.arc || '');
+                else $('#xyh_f_frags').val(fragsToLines(lad.frags));
                 $('#xyh_form_title').text('编辑：' + lad.title);
                 $('#xyh_f_cancel').show();
             } else if (act === 'del') {
@@ -1003,7 +1142,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.3.1 点灯');
+        console.log('[Luciole] v1.4.0 点灯');
     }
 
     jQuery(function () {
