@@ -1,4 +1,4 @@
-/* 小萤火 v1.3.0 —— 双主题面板，签名元素：萤火三态 */
+/* 小萤火 v1.3.1 —— 双主题面板，签名元素：萤火三态 */
 
 /* ---- 萤火点 ---- */
 .xyh-dot {
@@ -981,9 +981,15 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
     gap: 4px 7px;
     padding: 15px 5px 2px;
     color: var(--xyh-muted);
-    font-size: 0.74em;
-    letter-spacing: 0.045em;
+    font-size: 0.78em;
+    letter-spacing: 0.075em;
     text-align: center;
+}
+
+.xyh-signature > span:not(.xyh-signature-dot) {
+    color: var(--xyh-text);
+    font-weight: 650;
+    opacity: 0.78;
 }
 
 .xyh-signature b {

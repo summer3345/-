@@ -1,5 +1,5 @@
 /* ============================================================
- * 小萤火 v1.3.0 — 叙事节奏控制器
+ * 小萤火 v1.3.1 — 叙事节奏控制器
  * 把长线从模型手里收走：机器管节奏，模型管演技。
  * 纪律：ES5 全程；零全局补丁；只用官方 SillyTavern API。
  * v1.1.0：判读 API 方案制（跟随酒馆 / 独立 URL+Key+模型，多方案保存切换）；
@@ -503,7 +503,7 @@
         '        <button type="button" id="xyh_f_cancel" class="menu_button xyh-action-secondary" style="display:none;">取消编辑</button>' +
         '      </div>' +
         '    </div>' +
-        '    <div class="xyh-signature"><span class="xyh-signature-dot"></span><span>小狐狸构想</span><b>×</b><span>Claude 哥哥编写</span><b>×</b><span>猫猫设计</span></div>' +
+        '    <div class="xyh-signature" aria-label="联合创作署名"><span class="xyh-signature-dot"></span><span>GPT</span><b>×</b><span>Claude</span><b>×</b><span>ripple</span></div>' +
         '  </div>' +
         '</div>';
     }
@@ -1003,7 +1003,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.3.0 点灯');
+        console.log('[Luciole] v1.3.1 点灯');
     }
 
     jQuery(function () {
