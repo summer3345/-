@@ -1,5 +1,5 @@
 /* ============================================================
- * 小萤火 v1.1.0 — 叙事节奏控制器
+ * 小萤火 v1.3.0 — 叙事节奏控制器
  * 把长线从模型手里收走：机器管节奏，模型管演技。
  * 纪律：ES5 全程；零全局补丁；只用官方 SillyTavern API。
  * v1.1.0：判读 API 方案制（跟随酒馆 / 独立 URL+Key+模型，多方案保存切换）；
@@ -441,62 +441,69 @@
 
     function panelHtml() {
         return '' +
-        '<div id="xyh_panel" class="xyh-panel" style="display:none;position:fixed;top:8vh;left:50%;transform:translateX(-50%);width:min(480px,94vw);max-height:82vh;overflow-y:auto;z-index:30001;background:rgba(28,28,28,0.97);color:#ddd;border:1px solid #666;border-radius:12px;padding-bottom:4px;">' +
+        '<div id="xyh_panel" class="xyh-panel" style="display:none;position:fixed;top:8vh;left:50%;transform:translateX(-50%);width:min(480px,94vw);max-height:82vh;overflow-y:auto;z-index:30001;background:rgba(5,24,31,0.97);color:#e8f2ea;border:1px solid rgba(160,210,160,0.28);border-radius:18px;padding-bottom:4px;">' +
         '  <div class="xyh-head">' +
-        '    <span class="xyh-title"><span class="xyh-dot xyh-dot-lit"></span> Luciole</span>' +
+        '    <span class="xyh-brand">' +
+        '      <span class="xyh-title"><span class="xyh-dot xyh-dot-lit"></span> Luciole</span>' +
+        '      <span class="xyh-subtitle">让秘密循着萤火落下</span>' +
+        '    </span>' +
         '    <span class="xyh-head-btns">' +
         '      <span class="xyh-lamp" id="xyh_lamp" title="开关灯">💡</span>' +
         '      <span class="xyh-close" id="xyh_close">×</span>' +
         '    </span>' +
         '  </div>' +
         '  <div class="xyh-body">' +
-        '    <div class="xyh-row xyh-toggles">' +
-        '      <label><input type="checkbox" id="xyh_enabled"> 启用</label>' +
-        '      <label><input type="checkbox" id="xyh_floater_toggle"> 浮标</label>' +
-        '      <label><input type="checkbox" id="xyh_judge"> 判读（掉得更准，多一次 API 调用）</label>' +
-        '      <label>深度 <input type="number" id="xyh_depth" min="0" max="20" class="xyh-num"></label>' +
+        '    <div class="xyh-row xyh-control-card">' +
+        '      <div class="xyh-toggles xyh-main-toggles">' +
+        '        <label><input type="checkbox" id="xyh_enabled"> 启用</label>' +
+        '        <label><input type="checkbox" id="xyh_floater_toggle"> 浮标</label>' +
+        '        <label class="xyh-judge-toggle"><input type="checkbox" id="xyh_judge"> 判读 <small>更准 · 多一次 API</small></label>' +
+        '      </div>' +
+        '      <label class="xyh-depth-control"><span>注入深度</span><input type="number" id="xyh_depth" min="0" max="20" class="xyh-num"></label>' +
         '    </div>' +
-        '    <div class="xyh-row xyh-api" id="xyh_api_box">' +
-        '      <div class="xyh-label">判读用哪路 API</div>' +
-        '      <div class="xyh-toggles" style="margin-bottom:8px;">' +
+        '    <div class="xyh-row xyh-card xyh-api" id="xyh_api_box">' +
+        '      <div class="xyh-section-head"><span class="xyh-section-title">判读航道</span><small>选择萤火从哪一路听风</small></div>' +
+        '      <div class="xyh-toggles xyh-api-modes">' +
         '        <label><input type="radio" name="xyh_api_mode" value="current"> 跟随酒馆当前连接</label>' +
         '        <label><input type="radio" name="xyh_api_mode" value="custom"> 独立 API</label>' +
         '      </div>' +
         '      <div id="xyh_api_custom" style="display:none;">' +
-        '        <div class="xyh-inline" style="margin-bottom:8px;">' +
+        '        <div class="xyh-inline xyh-profile-row">' +
         '          <select id="xyh_api_select" class="xyh-select"></select>' +
         '          <span class="xyh-btn xyh-danger" id="xyh_api_del">删除方案</span>' +
         '        </div>' +
         '        <input type="text" id="xyh_api_name" placeholder="方案名（如：我的Gemini / 某中转）">' +
         '        <input type="text" id="xyh_api_url" placeholder="API 地址（贴到 /v1 即可，自动补全）">' +
         '        <input type="text" id="xyh_api_key" placeholder="API Key">' +
-        '        <div class="xyh-inline" style="gap:6px;margin-bottom:8px;">' +
+        '        <div class="xyh-inline xyh-model-row">' +
         '          <input type="text" id="xyh_api_model" placeholder="模型名（点右边拉取，或手填）" style="flex:1;margin-bottom:0;">' +
-        '          <button id="xyh_api_fetch_models" class="menu_button" style="white-space:nowrap;">拉取模型</button>' +
+        '          <button type="button" id="xyh_api_fetch_models" class="menu_button">拉取模型</button>' +
         '        </div>' +
         '        <select id="xyh_api_model_sel" style="display:none;width:100%;box-sizing:border-box;margin-bottom:8px;"></select>' +
-        '        <div class="xyh-form-btns">' +
-        '          <button id="xyh_api_save" class="menu_button">保存方案</button>' +
-        '          <button id="xyh_api_test" class="menu_button">测试连接</button>' +
+        '        <div class="xyh-form-btns xyh-api-actions">' +
+        '          <button type="button" id="xyh_api_test" class="menu_button xyh-action-secondary">测试连接</button>' +
+        '          <button type="button" id="xyh_api_save" class="menu_button xyh-action-primary">保存方案</button>' +
         '        </div>' +
         '      </div>' +
         '    </div>' +
-        '    <div class="xyh-row">' +
-        '      <div class="xyh-label">世界观要点（只喂给判读，不注入正文，可空）</div>' +
+        '    <div class="xyh-row xyh-card xyh-world-card">' +
+        '      <div class="xyh-section-head"><span class="xyh-section-title">世界观要点</span><small>只喂给判读 · 不注入正文 · 可空</small></div>' +
         '      <textarea id="xyh_worldnote" rows="2" placeholder="给判读法官的背景速览，比如：赤霄会是反派组织，主角尚不知情"></textarea>' +
         '    </div>' +
+        '    <div class="xyh-section-divider"><span>已种下的线</span></div>' +
         '    <div id="xyh_ladders" class="xyh-ladders"></div>' +
-        '    <div class="xyh-form">' +
-        '      <div class="xyh-label" id="xyh_form_title">种一条新线</div>' +
+        '    <div class="xyh-form xyh-card">' +
+        '      <div class="xyh-section-head"><span class="xyh-section-title" id="xyh_form_title">种一条新线</span><small>让秘密一颗颗落地</small></div>' +
         '      <input type="text" id="xyh_f_title" placeholder="这条线叫什么（如：女主的阵营秘密）">' +
         '      <input type="text" id="xyh_f_secret" placeholder="终点备注：真相是什么（只有你看得见，永不注入）">' +
-        '      <label class="xyh-inline">最少隔几楼掉一颗 <input type="number" id="xyh_f_gap" value="6" min="1" class="xyh-num"></label>' +
+        '      <label class="xyh-inline xyh-gap-control"><span>最少隔几楼掉一颗</span><input type="number" id="xyh_f_gap" value="6" min="1" class="xyh-num"></label>' +
         '      <textarea id="xyh_f_frags" rows="6" placeholder="一行一颗碎片，从早到晚排。格式：\n碎片内容 | 落地关键词(可空) | 前置关键词(可空) | 必\n\n例：\n她听到赤霄会三个字时有一瞬间的停顿 | 停顿,愣 | |\n她深夜发出过一条没头没尾的讯息 | 讯息,消息 | 停顿 |\n她与灰衣人在巷口碰面被目击 | 灰衣,巷口 | | 必"></textarea>' +
-        '      <div class="xyh-form-btns">' +
-        '        <button id="xyh_f_save" class="menu_button">种下</button>' +
-        '        <button id="xyh_f_cancel" class="menu_button" style="display:none;">取消编辑</button>' +
+        '      <div class="xyh-form-btns xyh-plant-actions">' +
+        '        <button type="button" id="xyh_f_save" class="menu_button xyh-action-primary">种下</button>' +
+        '        <button type="button" id="xyh_f_cancel" class="menu_button xyh-action-secondary" style="display:none;">取消编辑</button>' +
         '      </div>' +
         '    </div>' +
+        '    <div class="xyh-signature"><span class="xyh-signature-dot"></span><span>小狐狸构想</span><b>×</b><span>Claude 哥哥编写</span><b>×</b><span>猫猫设计</span></div>' +
         '  </div>' +
         '</div>';
     }
@@ -694,18 +701,16 @@
         });
     }
 
-    /* 开关灯：浅黄纸面 / 深夜面板 */
+    /* 开关灯：林间日光 / 萤火溪夜 */
     function applyTheme() {
         var t = settings().theme;
         var p = $('#xyh_panel');
         if (t === 'light') {
             p.addClass('xyh-light');
-            p.css({ background: '#fbf5e3', color: '#4a3f28', border: '1px solid #d9c99f' });
-            $('#xyh_lamp').text('🌙').attr('title', '关灯');
+            $('#xyh_lamp').text('☾').attr('title', '切到萤火溪夜');
         } else {
             p.removeClass('xyh-light');
-            p.css({ background: 'rgba(28,28,28,0.97)', color: '#ddd', border: '1px solid #666' });
-            $('#xyh_lamp').text('💡').attr('title', '开灯');
+            $('#xyh_lamp').text('☀').attr('title', '切到林间日光');
         }
     }
 
@@ -998,7 +1003,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.2.4 点灯');
+        console.log('[Luciole] v1.3.0 点灯');
     }
 
     jQuery(function () {
