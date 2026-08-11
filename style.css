@@ -113,6 +113,103 @@
     }
 }
 
+/* ---- 避风塘内的安全呼吸 ----
+ * Harbor 会把浮标外壳强制改成 position: static。港内不再让外壳的
+ * blur/transform 参与合成，而把光芯关进固定小画布，只动画 box-shadow。
+ * 这样仍有明暗呼吸，同时避免 iOS WebKit 把同排按钮一起闪掉。
+ */
+#extensionHarborDock #xyh_floater[data-harbor-parked="1"] {
+    background: transparent !important;
+    isolation: auto !important;
+}
+
+#extensionHarborDock #xyh_floater[data-harbor-parked="1"]::before {
+    display: none !important;
+    animation: none !important;
+    filter: none !important;
+}
+
+#extensionHarborDock #xyh_floater[data-harbor-parked="1"] .xyh-floater-firefly {
+    position: relative !important;
+    display: block !important;
+    width: 24px !important;
+    height: 20px !important;
+    border-radius: 10px !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    animation: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+    will-change: auto !important;
+    contain: layout paint;
+    overflow: hidden;
+}
+
+#extensionHarborDock #xyh_floater[data-harbor-parked="1"] .xyh-floater-firefly::before {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 4px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 32%,
+        rgba(255, 255, 245, 1) 0%,
+        rgba(255, 250, 190, 0.98) 22%,
+        rgba(248, 220, 105, 0.94) 45%,
+        rgba(211, 228, 122, 0.72) 68%,
+        rgba(126, 184, 138, 0.24) 100%);
+    box-shadow:
+        0 0 2px 0 rgba(255, 243, 156, 0.54),
+        0 0 4px 1px rgba(216, 230, 126, 0.24),
+        inset 0 0 2px rgba(255, 255, 244, 0.70);
+    animation: xyh-firefly-harbor-breathe 3.8s ease-in-out infinite;
+}
+
+#extensionHarborDock #xyh_floater[data-harbor-parked="1"] .xyh-floater-firefly::after {
+    left: 10px;
+    top: 6px;
+    width: 3px;
+    height: 3px;
+    background: rgba(255, 255, 246, 0.92);
+    filter: none;
+}
+
+@keyframes xyh-firefly-harbor-breathe {
+    0%, 100% {
+        box-shadow:
+            0 0 2px 0 rgba(255, 243, 156, 0.48),
+            0 0 4px 1px rgba(216, 230, 126, 0.20),
+            inset 0 0 2px rgba(255, 255, 244, 0.66);
+    }
+    48% {
+        box-shadow:
+            0 0 4px 1px rgba(255, 243, 156, 0.90),
+            0 0 7px 2px rgba(216, 230, 126, 0.50),
+            inset 0 0 3px rgba(255, 255, 244, 0.88);
+    }
+    72% {
+        box-shadow:
+            0 0 3px 1px rgba(255, 243, 156, 0.68),
+            0 0 5px 1px rgba(216, 230, 126, 0.31),
+            inset 0 0 2px rgba(255, 255, 244, 0.76);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .xyh-floater-firefly::before {
+        animation: none;
+        box-shadow:
+            0 0 3px 1px rgba(255, 243, 156, 0.72),
+            0 0 5px 1px rgba(216, 230, 126, 0.34),
+            inset 0 0 2px rgba(255, 255, 244, 0.78);
+    }
+}
+
+body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .xyh-floater-firefly::before {
+    animation: none;
+}
+
 /* ---- 面板 ---- */
 .xyh-panel {
     position: fixed;
