@@ -1,0 +1,11 @@
+{
+    "display_name": "Luciole",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "江小意 × 波哥",
+    "version": "1.2.1",
+    "homePage": ""
+}
