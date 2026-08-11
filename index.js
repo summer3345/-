@@ -23,6 +23,7 @@
             depth: 2,
             judge: false,
             showFloater: true,
+            theme: 'dark',
             api: {
                 mode: 'current',      // current = 跟随酒馆当前连接 / custom = 独立 API
                 activeIndex: -1,
@@ -44,6 +45,7 @@
         if (!s.api) s.api = defaults().api;
         if (!s.api.profiles) s.api.profiles = [];
         if (typeof s.showFloater !== 'boolean') s.showFloater = true;
+        if (s.theme !== 'light' && s.theme !== 'dark') s.theme = 'dark';
         return s;
     }
 
@@ -437,11 +439,15 @@
         '<div id="xyh_panel" class="xyh-panel" style="display:none;position:fixed;top:8vh;left:50%;transform:translateX(-50%);width:min(480px,94vw);max-height:82vh;overflow-y:auto;z-index:30001;background:rgba(28,28,28,0.97);color:#ddd;border:1px solid #666;border-radius:12px;padding-bottom:4px;">' +
         '  <div class="xyh-head">' +
         '    <span class="xyh-title"><span class="xyh-dot xyh-dot-lit"></span> Luciole</span>' +
-        '    <span class="xyh-close" id="xyh_close">×</span>' +
+        '    <span class="xyh-head-btns">' +
+        '      <span class="xyh-lamp" id="xyh_lamp" title="开关灯">💡</span>' +
+        '      <span class="xyh-close" id="xyh_close">×</span>' +
+        '    </span>' +
         '  </div>' +
         '  <div class="xyh-body">' +
         '    <div class="xyh-row xyh-toggles">' +
         '      <label><input type="checkbox" id="xyh_enabled"> 启用</label>' +
+        '      <label><input type="checkbox" id="xyh_floater_toggle"> 浮标</label>' +
         '      <label><input type="checkbox" id="xyh_judge"> 判读（掉得更准，多一次 API 调用）</label>' +
         '      <label>深度 <input type="number" id="xyh_depth" min="0" max="20" class="xyh-num"></label>' +
         '    </div>' +
@@ -644,10 +650,37 @@
         });
     }
 
+    /* 开关灯：浅黄纸面 / 深夜面板 */
+    function applyTheme() {
+        var t = settings().theme;
+        var p = $('#xyh_panel');
+        if (t === 'light') {
+            p.addClass('xyh-light');
+            p.css({ background: '#fbf5e3', color: '#4a3f28', border: '1px solid #d9c99f' });
+            $('#xyh_lamp').text('🌙').attr('title', '关灯');
+        } else {
+            p.removeClass('xyh-light');
+            p.css({ background: 'rgba(28,28,28,0.97)', color: '#ddd', border: '1px solid #666' });
+            $('#xyh_lamp').text('💡').attr('title', '开灯');
+        }
+    }
+
     function bindPanel() {
         var s = settings();
         $('#xyh_enabled').prop('checked', s.enabled).on('change', function () {
             s.enabled = $(this).prop('checked'); save(); updateInjection();
+        });
+        $('#xyh_floater_toggle').prop('checked', s.showFloater).on('change', function () {
+            s.showFloater = $(this).prop('checked');
+            save();
+            $('#xyh_floater').toggle(s.showFloater);
+            $('#xyh_show_floater').prop('checked', s.showFloater);
+        });
+        $('#xyh_lamp').on('click', function () {
+            var st = settings();
+            st.theme = (st.theme === 'light') ? 'dark' : 'light';
+            save();
+            applyTheme();
         });
         $('#xyh_judge').prop('checked', s.judge).on('change', function () {
             s.judge = $(this).prop('checked'); save();
@@ -753,6 +786,8 @@
     function refreshPanel() {
         var st = store();
         $('#xyh_worldnote').val(st ? (st.worldNote || '') : '');
+        $('#xyh_floater_toggle').prop('checked', settings().showFloater);
+        applyTheme();
         renderApiUI();
         renderLadders();
     }
@@ -859,6 +894,7 @@
             s.showFloater = $(this).prop('checked');
             save();
             $('#xyh_floater').toggle(s.showFloater);
+            $('#xyh_floater_toggle').prop('checked', s.showFloater);
         });
     }
 
@@ -917,7 +953,7 @@
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
 
-        console.log('[Luciole] v1.1.3 点灯');
+        console.log('[Luciole] v1.2.0 点灯');
     }
 
     jQuery(function () {

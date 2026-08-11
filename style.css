@@ -165,3 +165,56 @@
     gap: 10px;
     padding: 8px 4px;
 }
+
+/* ---- 开关灯 ---- */
+.xyh-head-btns {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.xyh-lamp {
+    cursor: pointer;
+    font-size: 1.1em;
+    opacity: 0.8;
+    user-select: none;
+}
+.xyh-lamp:hover { opacity: 1; }
+
+/* ---- 浅黄纸面主题 ---- */
+.xyh-panel.xyh-light .xyh-head {
+    border-bottom-color: #d9c99f;
+}
+.xyh-panel.xyh-light textarea,
+.xyh-panel.xyh-light input[type="text"],
+.xyh-panel.xyh-light select {
+    background: rgba(255, 255, 255, 0.65);
+    color: #4a3f28;
+    border-color: #cdbd93;
+}
+.xyh-panel.xyh-light textarea::placeholder,
+.xyh-panel.xyh-light input::placeholder {
+    color: #a3946f;
+}
+.xyh-panel.xyh-light .xyh-ladder {
+    border-color: #d9c99f;
+    background: rgba(255, 255, 255, 0.35);
+}
+.xyh-panel.xyh-light .xyh-btn {
+    border-color: #c4b489;
+    color: #5a4c30;
+}
+.xyh-panel.xyh-light .xyh-btn:hover {
+    background: rgba(255, 200, 60, 0.15);
+}
+.xyh-panel.xyh-light .xyh-danger { border-color: rgba(190, 90, 80, 0.7); }
+.xyh-panel.xyh-light .xyh-dot { background: #cdbd93; }
+.xyh-panel.xyh-light .xyh-dot-dim { opacity: 0.5; }
+.xyh-panel.xyh-light .xyh-dot-lit,
+.xyh-panel.xyh-light .xyh-dot-blink {
+    background: #f0b429;
+    box-shadow: 0 0 6px 2px rgba(240, 180, 41, 0.45);
+}
+.xyh-panel.xyh-light .xyh-form {
+    border-top-color: #d9c99f;
+}
+.xyh-panel.xyh-light .xyh-empty { color: #7a6a45; opacity: 0.85; }
