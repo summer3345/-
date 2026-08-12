@@ -1287,6 +1287,65 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
     scroll-margin-top: 68px;
 }
 
+/* v1.6.3 编译检查点 */
+.xyh-compile-checkpoint {
+  margin: 2px 0 12px;
+  padding: 11px 12px;
+  border: 1px solid rgba(239, 210, 119, .3);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(239, 210, 119, .11), rgba(104, 176, 149, .08));
+}
+
+.xyh-compile-checkpoint > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.xyh-compile-checkpoint > div:first-child span {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--xyh-muted);
+}
+
+.xyh-compile-checkpoint p {
+  margin: 6px 0 4px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.xyh-compile-checkpoint > small {
+  display: block;
+  margin-bottom: 8px;
+  color: #e6b5aa;
+  line-height: 1.5;
+}
+
+.xyh-checkpoint-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.xyh-checkpoint-actions .menu_button {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.xyh-light .xyh-compile-checkpoint {
+  border-color: rgba(157, 121, 34, .24);
+  background: linear-gradient(135deg, rgba(235, 199, 93, .13), rgba(85, 145, 120, .08));
+}
+
+.xyh-light .xyh-compile-checkpoint > small { color: #9c4f43; }
+
+@media (max-width: 420px) {
+  .xyh-checkpoint-actions { grid-template-columns: 1fr 1fr; }
+}
+
 .xyh-diag-actions { margin-bottom: 10px !important; }
 
 .xyh-diag-latest,
