@@ -1020,6 +1020,140 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
     .xyh-panel .menu_button { padding-inline: 10px; }
 }
 
+/* v1.6 三轨与人话账本 */
+.xyh-mini-title {
+    display: block;
+    margin: 10px 0 6px;
+    color: var(--xyh-text);
+    font-size: .88em;
+}
+
+.xyh-runtime-api-modes {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px !important;
+}
+
+.xyh-runtime-api-modes label,
+.xyh-event-wake {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.xyh-runtime-api-modes label {
+    padding: 8px;
+    border: 1px solid var(--xyh-line);
+    border-radius: 10px;
+    font-size: .82em;
+}
+
+.xyh-runtime-api-modes label:has(input:checked) {
+    border-color: var(--xyh-line-strong);
+    background: var(--xyh-hover);
+}
+
+.xyh-schedule-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.xyh-schedule-grid .xyh-stack-label {
+    grid-template-columns: 1fr;
+    gap: 4px;
+}
+
+.xyh-schedule-grid input[type="number"] {
+    width: 100%;
+    min-height: 38px;
+    box-sizing: border-box;
+    padding: 7px 9px;
+    border: 1px solid var(--xyh-line);
+    border-radius: 9px;
+    background: var(--xyh-input);
+    color: var(--xyh-text);
+}
+
+.xyh-mode-help,
+.xyh-schedule-preview {
+    margin: 7px 0;
+    padding: 9px 11px;
+    border-radius: 10px;
+    line-height: 1.5;
+    font-size: .86em;
+}
+
+.xyh-mode-help {
+    background: color-mix(in srgb, var(--xyh-accent) 9%, transparent);
+    color: var(--xyh-muted);
+}
+
+.xyh-schedule-preview {
+    border: 1px solid color-mix(in srgb, var(--xyh-accent) 32%, transparent);
+    color: var(--xyh-text);
+}
+
+.xyh-event-wake {
+    margin: 8px 0;
+    font-size: .87em;
+}
+
+.xyh-event-wake small { color: var(--xyh-muted); }
+
+#xyh_compile_dev,
+.xyh-human-clues,
+.xyh-ledger-dev {
+    margin-top: 10px;
+    border: 1px solid var(--xyh-line);
+    border-radius: 10px;
+    padding: 8px 10px;
+}
+
+#xyh_compile_dev > summary,
+.xyh-human-clues > summary,
+.xyh-ledger-dev > summary {
+    cursor: pointer;
+    color: var(--xyh-muted);
+    font-size: .86em;
+}
+
+.xyh-human-clues ol,
+.xyh-human-ledger ol {
+    padding-left: 22px;
+    margin: 9px 0;
+}
+
+.xyh-human-clues li,
+.xyh-human-ledger li {
+    margin-bottom: 8px;
+    line-height: 1.45;
+}
+
+.xyh-human-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.xyh-human-stats span {
+    padding: 7px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--xyh-accent) 8%, transparent);
+    text-align: center;
+    font-size: .78em;
+}
+
+.xyh-human-ledger h4 { margin: 8px 0; }
+.xyh-ledger-dev pre { max-height: 320px; overflow: auto; white-space: pre-wrap; }
+
+@media screen and (max-width: 520px) {
+    .xyh-runtime-api-modes,
+    .xyh-human-stats { grid-template-columns: 1fr; }
+    .xyh-schedule-grid { grid-template-columns: 1fr 1fr; }
+}
+
 /* 覆盖 v1.2 浅色兜底的高特异度规则，统一交回新主题变量。 */
 .xyh-panel.xyh-light textarea,
 .xyh-panel.xyh-light input[type="text"],
@@ -1129,6 +1263,24 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
     border-color: rgba(117, 190, 144, 0.50);
     background: rgba(83, 154, 114, 0.11);
 }
+
+.xyh-validation ul {
+    margin: 8px 0;
+    padding-left: 20px;
+}
+
+.xyh-validation li { margin: 4px 0; }
+
+.xyh-technical-reasons {
+    margin-top: 9px;
+    padding-top: 7px;
+    border-top: 1px solid var(--xyh-line);
+    color: var(--xyh-muted);
+    font-size: .84em;
+}
+
+.xyh-technical-reasons summary { cursor: pointer; }
+.xyh-technical-reasons p { margin: 7px 0 0; overflow-wrap: anywhere; }
 
 .xyh-compile-counts {
     margin: 7px 1px 10px;
@@ -1248,4 +1400,10 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
     .xyh-legacy-light { grid-template-columns: 1fr; }
     .xyh-legacy-check,
     .xyh-legacy-light small { grid-column: 1; }
+}
+
+.xyh-inspect .xyh-human-ledger {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    white-space: normal;
+    color: var(--xyh-text);
 }
