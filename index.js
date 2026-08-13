@@ -5836,8 +5836,212 @@
         return repaired;
     }
 
+    /* ---------------- v1.6.23 运行闸本地收口 ----------------
+       只处理「模型把话说歪了」，不处理「模型想越界」。
+       秘密边界（线索白名单、stage_plan 许可、力度上限、性质限制、阶段许可、
+       entry 因果闸、min_gap、override 白名单与目标越权、condition 复核越权）
+       全部原样留在下方硬闸。本层修完之后那些硬闸仍逐条复查一遍，
+       所以即使这里判断错了，也不会放宽任何一道秘密边界。 */
+
+    function pruneKeys(obj, allowed) {
+        if (!isObject(obj)) return obj;
+        var map = {};
+        for (var i = 0; i < allowed.length; i++) map[allowed[i]] = true;
+        var keys = Object.keys(obj);
+        for (var j = 0; j < keys.length; j++) if (!map[keys[j]]) delete obj[keys[j]];
+        return obj;
+    }
+
+    /* firstActiveLayer 已在下方既有代码中定义（同语义），此处不再重复声明。 */
+
+    function actionMatrixOk(action, hasRelease, moves) {
+        var hasOverride = false;
+        for (var i = 0; i < moves.length; i++) if (moves[i] && moves[i].via === 'override') hasOverride = true;
+        if (action === 'hold') return !moves.length && !hasRelease;
+        if (action === 'release') return hasRelease && !moves.length;
+        if (action === 'advance') return !hasRelease && !!moves.length;
+        if (action === 'release_and_advance') return hasRelease && !!moves.length;
+        if (action === 'override') return !!moves.length && hasOverride;
+        return false;
+    }
+
+    function localCoerceDecision(ladder, raw, gc) {
+        if (!isObject(raw)) return raw;
+        var d = clone(raw);
+        var notes = [];
+
+        /* 1. 未知键剪除：未知键本来就没有任何授权，删掉只会更窄。 */
+        pruneKeys(d, ['verdict', 'patch', 'packet_plan']);
+        if (!isObject(d.verdict)) d.verdict = {};
+        if (!isObject(d.patch)) d.patch = {};
+        if (!isObject(d.packet_plan)) return d;
+        pruneKeys(d.verdict, ['action', 'reason_code']);
+        pruneKeys(d.patch, ['stage_moves', 'pressure_set', 'condition_verdicts']);
+        pruneKeys(d.packet_plan, ['release_clue_id', 'release_variant_id', 'release_policy',
+            'focus_layer', 'boundary_policy', 'behavior_refs', 'anchor_scope']);
+        if (!isArray(d.patch.stage_moves)) d.patch.stage_moves = [];
+        if (!isArray(d.patch.pressure_set)) d.patch.pressure_set = [];
+        if (!isArray(d.patch.condition_verdicts)) d.patch.condition_verdicts = [];
+        for (var cv = 0; cv < d.patch.condition_verdicts.length; cv++) {
+            pruneKeys(d.patch.condition_verdicts[cv], ['cond_id', 'state']);
+        }
+        for (var sm = 0; sm < d.patch.stage_moves.length; sm++) {
+            var mv = d.patch.stage_moves[sm];
+            if (!isObject(mv)) continue;
+            pruneKeys(mv, ['layer', 'from', 'to', 'via', 'override_cond_id']);
+            if (mv.via !== 'override') delete mv.override_cond_id;
+        }
+
+        var pp = d.packet_plan;
+        var own = function (key) { return Object.prototype.hasOwnProperty.call(pp, key); };
+        if (!own('release_clue_id')) pp.release_clue_id = null;
+        if (!own('release_variant_id')) pp.release_variant_id = null;
+        if (!own('release_policy')) pp.release_policy = null;
+
+        /* 2. release 三元组补齐或整组清空。缺牌号一律清空（=暂缓，最窄）；
+              有牌号缺 variant 时取该牌已过安检的第一个安全变体；
+              缺 policy 时补最软的 scene_permitting。 */
+        var clueId = typeof pp.release_clue_id === 'string' && pp.release_clue_id ? pp.release_clue_id : null;
+        if (!clueId) {
+            if (pp.release_clue_id !== null || pp.release_variant_id !== null || pp.release_policy !== null) {
+                if (pp.release_variant_id !== null || pp.release_policy !== null) notes.push('残缺的投放三元组已整组清空');
+            }
+            pp.release_clue_id = null; pp.release_variant_id = null; pp.release_policy = null;
+        } else {
+            var relClue = clueById(ladder, clueId);
+            if (relClue && !isArray(relClue.safe_variants)) relClue = null;
+            if (relClue && !variantById(relClue, pp.release_variant_id) && relClue.safe_variants.length) {
+                pp.release_variant_id = relClue.safe_variants[0].variant_id;
+                notes.push('投放变体缺失，已改用该牌第一个安全变体');
+            }
+            if (RELEASE_POLICIES.indexOf(pp.release_policy) < 0 || pp.release_policy === null) {
+                pp.release_policy = 'scene_permitting';
+                notes.push('投放时机缺失，已补最软的 scene_permitting');
+            }
+            /* 3. focus_layer 对齐到牌本身所属层：这个值百分之百可推导。 */
+            if (relClue && layerIndex(relClue.layer) >= 0 && pp.focus_layer !== relClue.layer) {
+                pp.focus_layer = relClue.layer;
+                notes.push('focus_layer 已对齐到本轮投出的牌所在层');
+            }
+        }
+        if (layerIndex(pp.focus_layer) < 0 || !ladder.runtime.layers[pp.focus_layer] ||
+            !ladder.runtime.layers[pp.focus_layer].active) {
+            var fallbackLayer = firstActiveLayer(ladder);
+            if (pp.focus_layer !== fallbackLayer && !clueId) {
+                pp.focus_layer = fallbackLayer;
+                notes.push('focus_layer 非法或已停用，已收到最浅的在场层');
+            }
+        }
+
+        /* 4. boundary_policy 按该层 awareness 收到最窄合法档。
+              角色不知情或持假记忆时，六档里只有 honest_by_awareness 合法，
+              而这一档正是 safeBoundaryForLayer 早就在用的安全默认值。 */
+        var ps = ladder.safe_store.persona_safe;
+        var aware = ps && ps.awareness_by_layer ? ps.awareness_by_layer[pp.focus_layer] : null;
+        if (BOUNDARY_POLICIES.indexOf(pp.boundary_policy) < 0) {
+            pp.boundary_policy = safeBoundaryForLayer(ladder, pp.focus_layer);
+            notes.push('boundary_policy 非法，已收到本层安全默认档');
+        }
+        if ((aware === 'unknowing' || aware === 'false_memory') && pp.boundary_policy !== 'honest_by_awareness') {
+            pp.boundary_policy = 'honest_by_awareness';
+            notes.push('角色对该层不知情，boundary_policy 已收到 honest_by_awareness');
+        }
+        if (pp.boundary_policy === 'admit_evidenced_surface' && aware !== 'full' && aware !== 'partial') {
+            pp.boundary_policy = 'honest_by_awareness';
+            notes.push('admit_evidenced_surface 超出该层认知，已收到 honest_by_awareness');
+        }
+        if (['initial_only', 'initial_plus_disclosed'].indexOf(pp.anchor_scope) < 0) {
+            pp.anchor_scope = 'initial_only';
+            notes.push('anchor_scope 非法，已收到更窄的 initial_only');
+        }
+
+        /* 5. behavior_ref 越界、重复、冷却中的一律丢弃。
+              行为提示是可选装饰，丢掉只会更素，不会多说一个字。 */
+        var tellPool = (ps && ps.tell_pool) || [];
+        var refsIn = isArray(pp.behavior_refs) ? pp.behavior_refs : [];
+        var keptRefs = [];
+        var seenRef = {};
+        var droppedRefs = 0;
+        for (var br = 0; br < refsIn.length; br++) {
+            var ref = refsIn[br];
+            var usedFloor = ladder.runtime.tell_usage ? ladder.runtime.tell_usage[ref] : null;
+            var bad = typeof ref !== 'number' || ref % 1 || ref < 0 || ref >= tellPool.length ||
+                seenRef[ref] || (typeof usedFloor === 'number' && floorNow() - usedFloor < 4);
+            if (bad) { droppedRefs++; continue; }
+            seenRef[ref] = true;
+            keptRefs.push(ref);
+        }
+        if (keptRefs.length > 2) { droppedRefs += keptRefs.length - 2; keptRefs = keptRefs.slice(0, 2); }
+        if (droppedRefs) notes.push('丢弃 ' + droppedRefs + ' 个越界/重复/冷却中的行为提示');
+        pp.behavior_refs = keptRefs;
+
+        /* 6. pressure 只是张力记账，非法值夹回 0–10 并去重，不为它废掉整轮。 */
+        var keptPressure = [];
+        var seenPressureLayer = {};
+        for (var pr = 0; pr < d.patch.pressure_set.length; pr++) {
+            var item = d.patch.pressure_set[pr];
+            if (!isObject(item) || layerIndex(item.layer) < 0 || seenPressureLayer[item.layer]) continue;
+            pruneKeys(item, ['layer', 'value']);
+            var value = Number(item.value);
+            if (!isFinite(value)) continue;
+            value = Math.round(value);
+            if (value < 0) value = 0;
+            if (value > 10) value = 10;
+            if (value !== item.value) notes.push('压力值 ' + item.layer + ' 已夹回合法范围');
+            item.value = value;
+            seenPressureLayer[item.layer] = true;
+            keptPressure.push(item);
+        }
+        if (keptPressure.length > 3) keptPressure = keptPressure.slice(0, 3);
+        if (keptPressure.length !== d.patch.pressure_set.length) notes.push('已丢弃非法或重复的压力记账项');
+        d.patch.pressure_set = keptPressure;
+
+        /* 7. 越权或重复的 condition 复核直接丢弃：该条件保持原状，等于没复核。 */
+        var keptVerdicts = [];
+        var seenCond = {};
+        for (var vd = 0; vd < d.patch.condition_verdicts.length; vd++) {
+            var verdictItem = d.patch.condition_verdicts[vd];
+            if (!isObject(verdictItem) || seenCond[verdictItem.cond_id]) continue;
+            if ((gc && gc.reviewable_ids || []).indexOf(verdictItem.cond_id) < 0) continue;
+            if (verdictItem.state !== 'met' && verdictItem.state !== 'unmet') continue;
+            seenCond[verdictItem.cond_id] = true;
+            keptVerdicts.push(verdictItem);
+        }
+        if (keptVerdicts.length > 6) keptVerdicts = keptVerdicts.slice(0, 6);
+        if (keptVerdicts.length !== d.patch.condition_verdicts.length) notes.push('已丢弃越权或重复的条件复核');
+        d.patch.condition_verdicts = keptVerdicts;
+        if (d.patch.stage_moves.length > 2) {
+            d.patch.stage_moves = d.patch.stage_moves.slice(0, 2);
+            notes.push('阶段推进超过 2 项，已只保留前 2 项');
+        }
+
+        /* 8. action 按牌面本地推导。这个标签不守任何秘密边界——
+              牌能不能投、闸能不能过，全部由下方白名单硬闸决定，
+              这里只是不再让模型抄一份插件自己就能算出来的答案。 */
+        var hasRelease = pp.release_clue_id !== null;
+        if (ACTIONS.indexOf(d.verdict.action) < 0 || !actionMatrixOk(d.verdict.action, hasRelease, d.patch.stage_moves)) {
+            var hasOverrideMove = false;
+            for (var om = 0; om < d.patch.stage_moves.length; om++) {
+                if (d.patch.stage_moves[om] && d.patch.stage_moves[om].via === 'override') hasOverrideMove = true;
+            }
+            var derived = hasOverrideMove ? 'override'
+                : (hasRelease && d.patch.stage_moves.length) ? 'release_and_advance'
+                    : hasRelease ? 'release'
+                        : d.patch.stage_moves.length ? 'advance' : 'hold';
+            if (d.verdict.action !== derived) notes.push('action 与牌面不符，已本地推导为 ' + derived);
+            d.verdict.action = derived;
+        }
+        if (REASON_CODES.indexOf(d.verdict.reason_code) < 0) {
+            d.verdict.reason_code = d.verdict.action === 'hold' ? 'pace' : 'conditions_met';
+        }
+
+        if (notes.length) audit(ladder, 'runtime_local_coerce', { fixes: notes });
+        return d;
+    }
+
     function validateGodDecision(ladder, raw, gc) {
         var errors = [];
+        raw = localCoerceDecision(ladder, raw, gc);
         if (!exactKeys(raw, ['verdict', 'patch', 'packet_plan'])) return { errors: ['God 顶层字段非法'] };
         if (!exactKeys(raw.verdict, ['action', 'reason_code'])) errors.push('verdict 字段非法');
         if (!allowedKeys(raw.patch, ['stage_moves', 'pressure_set', 'condition_verdicts'])) errors.push('patch 字段非法');
