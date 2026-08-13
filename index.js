@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.4 — 上帝视角剧本引擎 · 三轨播种
+ * Luciole v1.6.5 — 上帝视角剧本引擎 · 三轨播种
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -31,7 +31,7 @@
     var MAX_STREAM_BYTES = 2097152;
     var SMART_STAGE_BATCH_SIZE = 8;
     var UNIFORM_STAGE_BATCH_SIZE = 25;
-    var currentStructuredOutputSupport = null;
+    var currentRawGenerationSupport = null;
     var editingDraft = null;
     var compileBusy = false;
     var resumeCompileDraftId = null;
@@ -478,6 +478,8 @@
         if (err.code === 'LUCIOLE_STAGE_SHAPE') return '这一小步已经收到回包，但字段没有交齐；已完成的前序步骤仍然保留，可以只重试本步。';
         var message = sanitizeDiagnosticText(err.message || String(error || ''), 500);
         if (/failed to fetch|networkerror|load failed|network request failed/i.test(message)) return '网络请求没有建立成功，请检查地址、网络或中转站状态。';
+        if (/service unavailable/i.test(message)) return '酒馆当前上游暂时不可用；插件已尝试兼容航道，仍未建立请求。请稍后重试。';
+        if (/bad request/i.test(message)) return '酒馆当前连接拒绝了这类后台生成请求；请展开技术详情确认兼容航道。';
         if (/模型名没有填写/.test(message)) return '模型名还没有填写。';
         if (/未配置独立 API 方案/.test(message)) return '这条航道还没有选择并保存可用的 API 方案。';
         if (/空内容|没有返回 JSON|unexpected end|json/i.test(message)) return '模型有回包，但内容为空、被截断或不是完整 JSON。';
@@ -490,6 +492,7 @@
         if (err.code) parts.push('错误代码：' + err.code);
         if (err.http_status) parts.push('HTTP 状态：' + err.http_status);
         if (err.message) parts.push('原始信息：' + err.message);
+        if (err.raw_route_error) parts.push('原始航道先前报错：' + err.raw_route_error);
         if (err.provider_detail && String(err.provider_detail) !== String(err.message || '')) parts.push('上游说明：' + err.provider_detail);
         if (err.transport) {
             var transportName = err.transport === 'stream' ? '流式接收'
@@ -1045,80 +1048,50 @@
         return callProfileApi(activeProfile(kind), systemPrompt, payload, maxTokens, temperature, timeoutMs, options);
     }
 
-    function structuredSchemaOption(schema, name) {
-        if (!isObject(schema)) return null;
-        return {
-            name: String(name || 'LucioleCompilePart').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60) || 'LucioleCompilePart',
-            description: 'Luciole compiler checkpoint part',
-            strict: true,
-            value: clone(schema)
-        };
-    }
-
     function callCurrentApi(systemPrompt, payload, timeoutMs, options) {
         options = options || {};
         var c = ctx();
-        var useRaw = !!options.raw && typeof c.generateRaw === 'function';
-        var canTrySchema = !!options.jsonSchema && currentStructuredOutputSupport !== false;
+        var useRaw = !!options.raw && typeof c.generateRaw === 'function' && currentRawGenerationSupport !== false;
         var telemetry = {
             stream_requested: false,
-            transport: useRaw ? (canTrySchema ? 'raw_structured' : 'raw_prompt') : (canTrySchema ? 'quiet_structured' : 'quiet_prompt'),
+            transport: useRaw ? 'raw_prompt' : 'quiet_prompt',
             started_ms: Date.now(), response_headers_ms: null, first_chunk_ms: null, received_bytes: 0,
-            schema_fallback: false
+            schema_fallback: false, raw_fallback: false
         };
         notifyApiTelemetry(options, telemetry);
 
-        function invoke(withSchema) {
+        function invokeRaw() {
+            return Promise.resolve(c.generateRaw({
+                systemPrompt: String(systemPrompt || ''),
+                prompt: safeJson(payload == null ? {} : payload)
+            })).then(function (res) { return String(res == null ? '' : res); });
+        }
+
+        function invokeQuiet() {
+            if (typeof c.generateQuietPrompt !== 'function') throw new Error('当前酒馆连接没有 raw 或 quiet prompt 能力');
             var p;
-            var schemaOption = withSchema ? structuredSchemaOption(options.jsonSchema, options.schemaName) : null;
-            if (useRaw) {
-                var rawArgs = { systemPrompt: String(systemPrompt || ''), prompt: safeJson(payload == null ? {} : payload) };
-                if (schemaOption) rawArgs.jsonSchema = schemaOption;
-                p = c.generateRaw(rawArgs);
-            } else {
-                if (typeof c.generateQuietPrompt !== 'function') throw new Error('当前酒馆连接没有 raw 或 quiet prompt 能力');
-                var quietArgs = { quietPrompt: dataEnvelope(systemPrompt, payload) };
-                if (schemaOption) quietArgs.jsonSchema = schemaOption;
-                try { p = c.generateQuietPrompt(quietArgs); }
-                catch (e) {
-                    if (schemaOption) {
-                        currentStructuredOutputSupport = false;
-                        telemetry.schema_fallback = true;
-                        telemetry.transport = 'quiet_prompt_fallback';
-                        notifyApiTelemetry(options, telemetry);
-                    }
-                    p = c.generateQuietPrompt(quietArgs.quietPrompt, false, true);
-                }
-            }
+            var quietPrompt = dataEnvelope(systemPrompt, payload);
+            try { p = c.generateQuietPrompt({ quietPrompt: quietPrompt }); }
+            catch (e) { p = c.generateQuietPrompt(quietPrompt, false, true); }
             return Promise.resolve(p).then(function (res) { return String(res == null ? '' : res); });
         }
 
         var request = new Promise(function (resolve, reject) {
             var first;
-            try { first = invoke(canTrySchema); }
+            try { first = useRaw ? invokeRaw() : invokeQuiet(); }
             catch (e) { reject(e); return; }
             first.catch(function (error) {
-                var message = String(error && error.message || error || '');
-                var schemaRejected = canTrySchema && /schema|structured|response[_ .-]?format|unsupported|not support|400|422|invalid parameter/i.test(message);
-                if (!schemaRejected) throw error;
-                currentStructuredOutputSupport = false;
-                telemetry.schema_fallback = true;
-                telemetry.transport = useRaw ? 'raw_prompt_fallback' : 'quiet_prompt_fallback';
+                if (!useRaw || typeof c.generateQuietPrompt !== 'function') throw error;
+                currentRawGenerationSupport = false;
+                telemetry.raw_fallback = true;
+                telemetry.transport = 'quiet_prompt_fallback';
                 notifyApiTelemetry(options, telemetry);
-                return invoke(false);
+                return invokeQuiet().catch(function (fallbackError) {
+                    fallbackError.raw_route_error = sanitizeDiagnosticText(error && error.message || String(error || ''), 300);
+                    throw fallbackError;
+                });
             }).then(function (text) {
-                /* ST 对不支持 structured outputs 的模型会返回 {}。只探测一次；
-                 * 该空对象不含有效 token，随后明确记账并退回普通短 JSON 提示。 */
-                if (canTrySchema && trim(text) === '{}') {
-                    currentStructuredOutputSupport = false;
-                    telemetry.schema_fallback = true;
-                    telemetry.transport = useRaw ? 'raw_prompt_fallback' : 'quiet_prompt_fallback';
-                    notifyApiTelemetry(options, telemetry);
-                    return invoke(false);
-                }
-                if (canTrySchema && !telemetry.schema_fallback) currentStructuredOutputSupport = true;
-                return text;
-            }).then(function (text) {
+                if (useRaw && !telemetry.raw_fallback) currentRawGenerationSupport = true;
                 if (!trim(text)) {
                     var empty = new Error('酒馆当前连接返回空内容');
                     empty.code = 'LUCIOLE_EMPTY_CONTENT';
@@ -1149,8 +1122,6 @@
             scope: 'compiler',
             stream: apiRoute('compiler').mode === 'custom',
             raw: apiRoute('compiler').mode !== 'custom',
-            jsonSchema: jsonSchema || null,
-            schemaName: schemaName || 'LucioleCompilePart',
             onTelemetry: telemetrySink
         });
     }
@@ -1869,7 +1840,8 @@
             received_bytes: typeof row.received_bytes === 'number' ? Math.max(0, Math.round(row.received_bytes)) : 0,
             event_count: typeof row.event_count === 'number' ? Math.max(0, Math.round(row.event_count)) : 0,
             saw_done: !!row.saw_done,
-            schema_fallback: !!row.schema_fallback
+            schema_fallback: !!row.schema_fallback,
+            raw_fallback: !!row.raw_fallback
         };
     }
 
@@ -1961,12 +1933,9 @@
         for (var i = 0; i < (reports || []).length; i++) {
             var row = reports[i];
             var transport = row.transport === 'stream' ? '流式'
-                : (row.transport === 'raw_structured' ? '酒馆原始结构化调用'
-                    : (row.transport === 'raw_prompt' ? '酒馆原始短调用'
-                        : (row.transport === 'raw_prompt_fallback' ? '酒馆原始短调用（模型不支持结构化，已兼容）'
-                            : (row.transport === 'quiet_structured' ? '酒馆上下文结构化调用'
-                                : (row.transport === 'quiet_prompt_fallback' ? '酒馆上下文短调用（模型不支持结构化，已兼容）'
-                                    : (row.transport === 'quiet_prompt' ? '酒馆当前连接（兼容调用）' : '整包 JSON'))))));
+                : (row.transport === 'raw_prompt' ? '酒馆原始短调用（无原生 Schema）'
+                    : (row.transport === 'quiet_prompt_fallback' ? '酒馆兼容短调用（原始航道被拒后自动切换）'
+                        : (row.transport === 'quiet_prompt' ? '酒馆兼容短调用（无原生 Schema）' : '整包 JSON')));
             var bits = [row.label + '：' + transport];
             if (typeof row.response_headers_ms === 'number') bits.push('响应头 ' + (row.response_headers_ms / 1000).toFixed(1) + ' 秒');
             if (typeof row.first_chunk_ms === 'number') bits.push('首块 ' + (row.first_chunk_ms / 1000).toFixed(1) + ' 秒');
@@ -4921,7 +4890,6 @@
 
     function beginCompile() {
         if (compileBusy) { toast('God 还在编译上一批，请稍等。'); return; }
-        if (apiRoute('compiler').mode !== 'custom') currentStructuredOutputSupport = null;
         var st = store();
         if (!st) { rejectCompileBeforeCall('请先打开一个聊天，再开始编译。'); return; }
         var compileChatId = chatKey();
@@ -5257,6 +5225,7 @@
         var testOptions = {
             scope: kind === 'compiler' ? 'compiler' : 'runtime',
             stream: kind === 'compiler' && (!!profileOverride || route.mode === 'custom'),
+            raw: kind === 'compiler' && !profileOverride && route.mode !== 'custom',
             onTelemetry: function (row) { testTelemetry = normalizeCompileTelemetry(row); }
         };
         if (button && button.length) button.prop('disabled', true).text('连接中……');
@@ -5564,7 +5533,7 @@
     }
 
     function init() {
-        console.log('[Luciole] v1.6.4 init 开始');
+        console.log('[Luciole] v1.6.5 init 开始');
         var c;
         try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
         try {
@@ -5586,7 +5555,7 @@
         if (t.MESSAGE_EDITED) ev.on(t.MESSAGE_EDITED, onStoryRewrite);
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
-        console.log('[Luciole] v1.6.4 三轨点灯');
+        console.log('[Luciole] v1.6.5 三轨点灯');
     }
 
     if (typeof window !== 'undefined' && window.__LUCIOLE_TEST__) {
@@ -5632,8 +5601,8 @@
             openAiStreamEvent: openAiStreamEvent,
             callProfileApi: callProfileApi,
             callCurrentApi: callCurrentApi,
-            setCurrentStructuredOutputSupportForTests: function (value) {
-                currentStructuredOutputSupport = value === true ? true : (value === false ? false : null);
+            setCurrentRawGenerationSupportForTests: function (value) {
+                currentRawGenerationSupport = value === true ? true : (value === false ? false : null);
             },
             timeoutError: timeoutError,
             normalizeCompileCheckpoint: normalizeCompileCheckpoint,
