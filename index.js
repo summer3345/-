@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.17 — 上帝视角剧本引擎 · 干净编译航道
+ * Luciole v1.6.18 — 上帝视角剧本引擎 · 宽口编译器
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -684,7 +684,16 @@
         if (status >= 500) return '上游服务暂时异常，不是秘密内容的问题。';
         if (err.code === 'LUCIOLE_TIMEOUT' && err.timeout_scope === 'compiler') return '编译等待超过 ' + Math.max(1, Math.round((err.timeout_ms || COMPILE_TIMEOUT_MS) / 1000)) + ' 秒，已停止本批；此前完成的草稿仍然保留。';
         if (err.code === 'LUCIOLE_TIMEOUT') return '请求超过 20 秒没有返回；正式运行时本轮会安全放行。';
-        if (err.code === 'LUCIOLE_STAGE_SHAPE') return '这一小步已经收到回包，但字段没有交齐；已完成的前序步骤仍然保留，可以只重试本步。';
+        if (err.code === 'LUCIOLE_STAGE_SHAPE') {
+            var stageMessage = String(err.message || '');
+            if (/不能凭空替 God 发明因果|没有交回可判定的 conditions/.test(stageMessage)) {
+                return 'God 交回了结构外壳，却没有写出真正可判定的因果条件；小萤火不能替它编造。已完成草稿会保留，只需换模型或重试这一步。';
+            }
+            if (/彼此冲突|互相冲突/.test(stageMessage)) {
+                return 'God 同时交回了两套互相矛盾的写法；小萤火已经接住常见字段方言，但不会替它猜哪一套是真的。只需重试本步。';
+            }
+            return '这一小步已经收到回包；小萤火已自动翻译常见字段并补齐可证明的接线，但仍缺少不能安全代猜的内容。前序草稿仍保留，只需重试本步。';
+        }
         var message = sanitizeDiagnosticText(err.message || String(error || ''), 500);
         if (/failed to fetch|networkerror|load failed|network request failed/i.test(message) && err.transport === 'st_profile_stream') {
             if ((err.received_bytes || 0) > 0) return '真流式已经收到有效文字，但连接在完成前中断；草稿检查点仍然保留。';
@@ -3318,6 +3327,12 @@
 
     function normalizeCompileTelemetry(row) {
         if (!isObject(row)) return null;
+        var localRepairs = [];
+        var repairSource = isArray(row.local_repairs) ? row.local_repairs : [];
+        for (var lr = 0; lr < repairSource.length && localRepairs.length < 20; lr++) {
+            var repair = sanitizeDiagnosticText(repairSource[lr], 180);
+            if (repair && localRepairs.indexOf(repair) < 0) localRepairs.push(repair);
+        }
         return {
             label: sanitizeDiagnosticText(row.label || '编译调用', 80),
             stream_requested: !!row.stream_requested,
@@ -3341,7 +3356,8 @@
             saw_done: !!row.saw_done,
             reasoning_json_recovered: !!row.reasoning_json_recovered,
             schema_fallback: !!row.schema_fallback,
-            raw_fallback: !!row.raw_fallback
+            raw_fallback: !!row.raw_fallback,
+            local_repairs: localRepairs
         };
     }
 
@@ -3428,6 +3444,17 @@
         return normalized;
     }
 
+    function attachCompileRepairs(reports, label, notes, telemetryObserver) {
+        if (!notes || !notes.length) return;
+        var row = null;
+        for (var i = reports.length - 1; i >= 0; i--) {
+            if (reports[i].label === label) { row = reports[i]; break; }
+        }
+        if (!row) return;
+        row.local_repairs = uniqueStrings((row.local_repairs || []).concat(notes)).slice(0, 20);
+        if (telemetryObserver) telemetryObserver(label, normalizeCompileTelemetry(row));
+    }
+
     function compileReportText(reports) {
         var lines = [];
         for (var i = 0; i < (reports || []).length; i++) {
@@ -3451,7 +3478,9 @@
             if (typeof row.requested_max_tokens === 'number') bits.push('上限 ' + row.requested_max_tokens + ' tokens');
             if (row.profile_preset_inherited === false) bits.push('编译预设隔离');
             if (row.reasoning_json_recovered) bits.push('已接管误入思考通道的完整 JSON');
+            if (row.local_repairs && row.local_repairs.length) bits.push('本地兼容收口 ' + row.local_repairs.length + ' 项');
             lines.push(bits.join(' · '));
+            if (row.local_repairs && row.local_repairs.length) lines.push('  ↳ ' + row.local_repairs.join('；'));
         }
         return lines.join('\n');
     }
@@ -3598,12 +3627,44 @@
 
     function ensureStageObject(text, keys, label) {
         var raw = extractJson(text);
+        var wrappers = ['result', 'data', 'output'];
         if (!exactKeys(raw, keys)) {
+            for (var w = 0; w < wrappers.length; w++) {
+                if (isObject(raw[wrappers[w]])) { raw = raw[wrappers[w]]; break; }
+            }
+        }
+        var aliasMap = {
+            claims: ['claims', 'claim_list', 'claimList'],
+            initial_public_version: ['initial_public_version', 'initialPublicVersion'],
+            initial_public_anchor: ['initial_public_anchor', 'initialPublicAnchor'],
+            public_atoms: ['public_atoms', 'publicAtoms'],
+            wake_aliases: ['wake_aliases', 'wakeAliases'],
+            jurisdiction: ['jurisdiction', 'protected_scope', 'protectedScope'],
+            persona_safe: ['persona_safe', 'personaSafe'],
+            environment_palette: ['environment_palette', 'environmentPalette'],
+            clues: ['clues', 'candidate_clues', 'candidateClues'],
+            seeds: ['seeds', 'seed_list', 'seedList'],
+            evidence_type_whitelist: ['evidence_type_whitelist', 'evidenceTypeWhitelist']
+        };
+        var out = {};
+        var complete = isObject(raw);
+        for (var i = 0; i < keys.length && complete; i++) {
+            var aliases = aliasMap[keys[i]] || [keys[i]];
+            var value = MISSING;
+            for (var a = 0; a < aliases.length; a++) {
+                if (!Object.prototype.hasOwnProperty.call(raw, aliases[a])) continue;
+                if (value !== MISSING && !sameRawValue(value, raw[aliases[a]])) { complete = false; break; }
+                value = raw[aliases[a]];
+            }
+            if (value === MISSING) complete = false;
+            else out[keys[i]] = clone(value);
+        }
+        if (!complete || !exactKeys(out, keys)) {
             var error = new Error(label + '没有按短步骤契约返回完整字段');
             error.code = 'LUCIOLE_STAGE_SHAPE';
             throw error;
         }
-        return raw;
+        return out;
     }
 
     function mergeStagePart(draft, raw, keys, label) {
@@ -3713,7 +3774,7 @@
         if (!isObject(spec)) return condition;
 
         if (condition.kind === 'evidence') {
-            var evidenceKeys = ['clue_ids', 'evidence_candidate_ids', 'candidate_ids', 'evidence_ids', 'ids'];
+            var evidenceKeys = ['clue_ids', 'clueIds', 'evidence_candidate_ids', 'evidenceCandidateIds', 'candidate_ids', 'candidateIds', 'evidence_ids', 'evidenceIds', 'ids'];
             if (!allowedKeys(spec, evidenceKeys.concat(['logic', 'operator', 'match']))) return condition;
             var clueIds = conditionSpecListFromAliases(spec, evidenceKeys);
             var evidenceLogic = clueIds && canonicalConditionLogic(spec, clueIds.length);
@@ -3722,7 +3783,7 @@
         }
 
         if (condition.kind === 'keyword_event') {
-            var keywordKeys = ['aliases', 'keywords', 'wake_aliases', 'terms'];
+            var keywordKeys = ['aliases', 'keywords', 'wake_aliases', 'wakeAliases', 'terms'];
             if (!allowedKeys(spec, keywordKeys.concat(['logic', 'operator', 'match']))) return condition;
             var aliases = conditionSpecListFromAliases(spec, keywordKeys);
             var keywordLogic = aliases && canonicalConditionLogic(spec, aliases.length);
@@ -3732,8 +3793,8 @@
 
         if (condition.kind === 'relation' || condition.kind === 'world_event') {
             var textKeys = condition.kind === 'relation'
-                ? ['text', 'description', 'condition', 'requirement', 'value', 'relation', 'relationship', 'relation_text']
-                : ['text', 'description', 'condition', 'requirement', 'value', 'event', 'world_event', 'event_description'];
+                ? ['text', 'description', 'condition', 'condition_text', 'conditionText', 'requirement', 'value', 'relation', 'relationship', 'relation_text', 'relationText']
+                : ['text', 'description', 'condition', 'condition_text', 'conditionText', 'requirement', 'value', 'event', 'world_event', 'worldEvent', 'event_description', 'eventDescription'];
             var allowed = textKeys.concat(['logic', 'type', 'kind']);
             if (!allowedKeys(spec, allowed)) return condition;
             if (Object.prototype.hasOwnProperty.call(spec, 'logic') && !canonicalConditionLogic({ logic: spec.logic }, 1)) return condition;
@@ -3754,19 +3815,418 @@
         return out;
     }
 
-    function prepareStagedStructurePart(raw) {
-        var out = normalizeStagedConditionSpecs(raw);
-        var plansByLayer = isObject(out.stage_plans) ? out.stage_plans : {};
-        for (var l = 0; l < LAYERS.length; l++) {
-            var plans = isArray(plansByLayer[LAYERS[l]]) ? plansByLayer[LAYERS[l]] : [];
-            for (var p = 0; p < plans.length; p++) {
-                if (!isObject(plans[p])) continue;
-                delete plans[p].min_gap;
-                plans[p].clue_ids = [];
+    function stagedShapeError(message) {
+        var error = new Error('因果结构步骤' + message);
+        error.code = 'LUCIOLE_STAGE_SHAPE';
+        throw error;
+    }
+
+    function stagedRepairNote(notes, message) {
+        if (!notes) return;
+        if (notes.indexOf(message) < 0) notes.push(message);
+    }
+
+    function sameRawValue(a, b) {
+        return safeJson(a) === safeJson(b);
+    }
+
+    /* 同义字段可以收口；两份同义字段互相冲突时绝不猜。 */
+    function stagedAliasValue(object, keys, label, notes) {
+        if (!isObject(object)) return MISSING;
+        var found = MISSING;
+        var foundKey = '';
+        for (var i = 0; i < keys.length; i++) {
+            if (!Object.prototype.hasOwnProperty.call(object, keys[i])) continue;
+            if (found !== MISSING && !sameRawValue(found, object[keys[i]])) {
+                stagedShapeError('里“' + label + '”的同义字段彼此冲突，不能安全代猜');
+            }
+            found = object[keys[i]];
+            foundKey = keys[i];
+        }
+        if (found !== MISSING && foundKey !== keys[0]) stagedRepairNote(notes, '已把“' + foundKey + '”翻译成“' + keys[0] + '”');
+        return found === MISSING ? MISSING : clone(found);
+    }
+
+    function canonicalStagedLayer(value) {
+        var key = trim(value).toLowerCase();
+        var aliases = {
+            fact: 'fact', facts: 'fact', factual: 'fact', '事实': 'fact', '事实层': 'fact',
+            motive: 'motive', motives: 'motive', motivation: 'motive', '动机': 'motive', '动机层': 'motive',
+            emotion: 'emotion', emotions: 'emotion', emotional: 'emotion', feeling: 'emotion', feelings: 'emotion', '情感': 'emotion', '情感层': 'emotion'
+        };
+        return aliases[key] || trim(value);
+    }
+
+    function canonicalStagedStage(value) {
+        var key = trim(value).toLowerCase();
+        var aliases = {
+            dormant: 'dormant', sleeping: 'dormant', latent: 'dormant', '沉睡': 'dormant', '沉睡期': 'dormant',
+            trace: 'trace', traces: 'trace', hint: 'trace', hints: 'trace', '留痕': 'trace', '痕迹': 'trace',
+            suspect: 'suspect', suspicious: 'suspect', suspicion: 'suspect', '可疑': 'suspect', '怀疑': 'suspect',
+            verifiable: 'verifiable', verify: 'verifiable', verification: 'verifiable', '可验证': 'verifiable', '验证': 'verifiable',
+            critical: 'critical', threshold: 'critical', '临界': 'critical', '临界点': 'critical',
+            revealed: 'revealed', reveal: 'revealed', disclosure: 'revealed', '揭晓': 'revealed', '公开': 'revealed'
+        };
+        return aliases[key] || trim(value);
+    }
+
+    function canonicalStagedKind(value) {
+        var key = trim(value).toLowerCase();
+        var aliases = {
+            evidence: 'evidence', clue: 'evidence', clues: 'evidence', evidence_condition: 'evidence', '证据': 'evidence',
+            keyword_event: 'keyword_event', keyword: 'keyword_event', keywords: 'keyword_event', wake: 'keyword_event', '关键词': 'keyword_event', '话题': 'keyword_event',
+            relation: 'relation', relationship: 'relation', '关系': 'relation',
+            world_event: 'world_event', event: 'world_event', world: 'world_event', '世界事件': 'world_event', '事件': 'world_event'
+        };
+        return aliases[key] || trim(value);
+    }
+
+    function stagedIdList(value, label) {
+        if (value === MISSING || value === null || value === undefined || value === '') return [];
+        var source = typeof value === 'string' ? [value] : value;
+        if (!isArray(source)) stagedShapeError('里的“' + label + '”不是可识别的编号列表');
+        var out = [];
+        for (var i = 0; i < source.length; i++) {
+            var item = source[i];
+            if (isObject(item)) item = stagedAliasValue(item, ['cond_id', 'condId', 'condition_id', 'conditionId', 'gate_id', 'gateId', 'id'], label + '编号');
+            if (item === MISSING || typeof item !== 'string' || !trim(item)) stagedShapeError('里的“' + label + '”含有无法识别的编号');
+            out.push(trim(item));
+        }
+        return uniqueStrings(out);
+    }
+
+    function normalizeStagedTarget(value, overrideMode, notes) {
+        if (typeof value === 'string') {
+            var pieces = trim(value).split(/\s*(?:\/|\||:|>|→|,|，)\s*/);
+            if (pieces.length === 2 && LAYERS.indexOf(canonicalStagedLayer(pieces[0])) >= 0 && STAGES.indexOf(canonicalStagedStage(pieces[1])) >= 0) {
+                stagedRepairNote(notes, '文字式目标“' + trim(value) + '”已拆成层与档位');
+                value = { layer: pieces[0], stage: pieces[1] };
             }
         }
-        out.stage_plans = plansByLayer;
+        if (!isObject(value)) return value;
+        var layer = stagedAliasValue(value, ['layer', 'onion_layer', 'onionLayer', 'truth_layer', 'truthLayer'], '目标层', notes);
+        var stageKeys = overrideMode ? ['max_stage', 'maxStage', 'stage', 'phase', 'stage_id', 'stageId'] : ['stage', 'phase', 'stage_id', 'stageId'];
+        var stage = stagedAliasValue(value, stageKeys, overrideMode ? '越闸最深档位' : '目标档位', notes);
+        var out = {};
+        if (layer !== MISSING) out.layer = canonicalStagedLayer(layer);
+        if (stage !== MISSING) out[overrideMode ? 'max_stage' : 'stage'] = canonicalStagedStage(stage);
         return out;
+    }
+
+    function normalizeStagedOverrideTargets(value, notes) {
+        if (value === MISSING || value === null || value === undefined || value === '') return [];
+        var source = isArray(value) ? value : [value];
+        var out = [];
+        for (var i = 0; i < source.length; i++) out.push(normalizeStagedTarget(source[i], true, notes));
+        return out;
+    }
+
+    function normalizeStagedConditionItem(item, fallbackId, index, notes) {
+        if (!isObject(item)) stagedShapeError('里的第 ' + (index + 1) + ' 个条件不是对象');
+        var condId = stagedAliasValue(item, ['cond_id', 'condId', 'condition_id', 'conditionId', 'gate_id', 'gateId', 'id'], '条件编号', notes);
+        var kind = stagedAliasValue(item, ['kind', 'type', 'condition_type', 'conditionType'], '条件类型', notes);
+        var spec = stagedAliasValue(item, ['spec', 'conditionSpec', 'params', 'criteria', 'rule'], '条件内容', notes);
+        var target = stagedAliasValue(item, ['target', 'stage_target', 'stageTarget', 'applies_to', 'appliesTo'], '条件目标', notes);
+        var overrides = stagedAliasValue(item, ['override_targets', 'overrideTargets', 'overrides', 'override'], '越闸目标', notes);
+        var sticky = stagedAliasValue(item, ['sticky', 'isSticky', 'persistent', 'remember'], '持续记忆', notes);
+
+        if (condId === MISSING) {
+            condId = fallbackId || ('K' + ('0' + (index + 1)).slice(-2));
+            stagedRepairNote(notes, '已为缺少编号的条件补上本地编号 ' + condId);
+        }
+
+        if (kind === MISSING) {
+            if (Object.prototype.hasOwnProperty.call(item, 'clue_ids') || Object.prototype.hasOwnProperty.call(item, 'clueIds') ||
+                Object.prototype.hasOwnProperty.call(item, 'evidence_candidate_ids') || Object.prototype.hasOwnProperty.call(item, 'evidenceCandidateIds')) kind = 'evidence';
+            else if (Object.prototype.hasOwnProperty.call(item, 'aliases') || Object.prototype.hasOwnProperty.call(item, 'keywords') ||
+                Object.prototype.hasOwnProperty.call(item, 'wakeAliases')) kind = 'keyword_event';
+            else if (isObject(spec)) {
+                var specHasEvidence = ['clue_ids', 'clueIds', 'evidence_candidate_ids', 'evidenceCandidateIds', 'candidate_ids', 'candidateIds', 'evidence_ids', 'evidenceIds'].some(function (key) {
+                    return Object.prototype.hasOwnProperty.call(spec, key);
+                });
+                var specHasKeyword = ['aliases', 'keywords', 'wake_aliases', 'wakeAliases', 'terms'].some(function (key) {
+                    return Object.prototype.hasOwnProperty.call(spec, key);
+                });
+                if (specHasEvidence && !specHasKeyword) kind = 'evidence';
+                else if (specHasKeyword && !specHasEvidence) kind = 'keyword_event';
+            }
+        }
+        kind = kind === MISSING ? '' : canonicalStagedKind(kind);
+
+        if (spec === MISSING) {
+            if (kind === 'evidence') {
+                spec = {};
+                var clueIds = stagedAliasValue(item, ['clue_ids', 'clueIds', 'evidence_candidate_ids', 'evidenceCandidateIds', 'candidate_ids', 'candidateIds', 'evidence_ids', 'evidenceIds', 'ids'], '证据编号', notes);
+                var clueLogic = stagedAliasValue(item, ['logic', 'operator', 'match'], '证据逻辑', notes);
+                if (clueIds !== MISSING) spec.clue_ids = clueIds;
+                if (clueLogic !== MISSING) spec.logic = clueLogic;
+            } else if (kind === 'keyword_event') {
+                spec = {};
+                var aliases = stagedAliasValue(item, ['aliases', 'keywords', 'wake_aliases', 'wakeAliases', 'terms'], '公开关键词', notes);
+                var keywordLogic = stagedAliasValue(item, ['logic', 'operator', 'match'], '关键词逻辑', notes);
+                if (aliases !== MISSING) spec.aliases = aliases;
+                if (keywordLogic !== MISSING) spec.logic = keywordLogic;
+            } else if (kind === 'relation' || kind === 'world_event') {
+                var text = stagedAliasValue(item, ['text', 'description', 'condition', 'condition_text', 'conditionText', 'requirement', 'value'], '条件文字', notes);
+                if (text !== MISSING) spec = { text: text };
+            }
+        }
+
+        if (target === MISSING) {
+            var flatLayer = stagedAliasValue(item, ['layer', 'target_layer', 'targetLayer', 'onion_layer', 'onionLayer', 'truth_layer', 'truthLayer'], '目标层', notes);
+            var flatStage = stagedAliasValue(item, ['stage', 'target_stage', 'targetStage', 'phase', 'stage_id', 'stageId'], '目标档位', notes);
+            if (flatLayer !== MISSING || flatStage !== MISSING) {
+                target = {};
+                if (flatLayer !== MISSING) target.layer = flatLayer;
+                if (flatStage !== MISSING) target.stage = flatStage;
+            }
+        }
+
+        if (typeof sticky === 'string') {
+            if (trim(sticky).toLowerCase() === 'true') sticky = true;
+            else if (trim(sticky).toLowerCase() === 'false') sticky = false;
+        }
+        if (sticky === MISSING) {
+            sticky = true;
+            stagedRepairNote(notes, '缺少 sticky 的条件已按“达成后持续有效”处理');
+        }
+
+        var out = {
+            cond_id: trim(condId),
+            kind: kind,
+            spec: spec === MISSING ? {} : clone(spec),
+            target: target === MISSING ? {} : normalizeStagedTarget(target, false, notes),
+            override_targets: normalizeStagedOverrideTargets(overrides, notes),
+            sticky: sticky
+        };
+        return normalizeStagedConditionSpec(out);
+    }
+
+    function normalizeStagedConditions(value, notes) {
+        if (isObject(value)) {
+            var wrapped = stagedAliasValue(value, ['items', 'conditions', 'conditionList', 'list', '条件'], '条件列表', notes);
+            if (wrapped !== MISSING) value = wrapped;
+        }
+        var source = value;
+        var mapKeys = null;
+        if (isObject(source)) {
+            mapKeys = Object.keys(source);
+            var mapped = [];
+            for (var m = 0; m < mapKeys.length; m++) mapped.push(source[mapKeys[m]]);
+            source = mapped;
+            stagedRepairNote(notes, '条件字典已转成标准条件列表');
+        }
+        if (!isArray(source)) stagedShapeError('没有交回可识别的 conditions 条件列表');
+        var out = [];
+        for (var i = 0; i < source.length; i++) out.push(normalizeStagedConditionItem(source[i], mapKeys && mapKeys[i], i, notes));
+        return out;
+    }
+
+    function normalizeStagedPlanEntry(value, plan, notes) {
+        if (value === MISSING) {
+            var flatIds = stagedAliasValue(plan, ['condition_ids', 'conditionIds', 'conditions', 'cond_ids', 'condIds', 'ids'], '阶段条件编号', notes);
+            var flatLogic = stagedAliasValue(plan, ['logic', 'operator', 'match'], '阶段条件逻辑', notes);
+            if (flatIds !== MISSING || flatLogic !== MISSING) {
+                value = {};
+                if (flatIds !== MISSING) value.condition_ids = flatIds;
+                if (flatLogic !== MISSING) value.logic = flatLogic;
+            }
+        }
+        if (typeof value === 'string' || isArray(value)) value = { condition_ids: value };
+        if (!isObject(value)) value = {};
+        var ids = stagedAliasValue(value, ['condition_ids', 'conditionIds', 'conditions', 'cond_ids', 'condIds', 'ids'], '阶段条件编号', notes);
+        var list = stagedIdList(ids, '阶段条件编号');
+        var logicRaw = stagedAliasValue(value, ['logic', 'operator', 'match'], '阶段条件逻辑', notes);
+        var logic = logicRaw === MISSING ? 'all' : canonicalConditionLogic({ logic: logicRaw }, Math.max(1, list.length));
+        if (!logic) stagedShapeError('里的阶段条件逻辑互相冲突或无法识别');
+        if (logicRaw === MISSING) stagedRepairNote(notes, '缺少 entry.logic 的门已按更保守的 all 逻辑接线');
+        return { condition_ids: list, logic: logic };
+    }
+
+    function normalizeStagedPlanItem(item, fallbackStage, notes) {
+        if (typeof item === 'string' || isArray(item)) item = { entry: item };
+        if (!isObject(item)) stagedShapeError('里有无法识别的阶段计划');
+        var stage = stagedAliasValue(item, ['stage_id', 'stageId', 'stage', 'phase'], '阶段编号', notes);
+        if (stage === MISSING) stage = fallbackStage;
+        var entry = stagedAliasValue(item, ['entry', 'gate', 'requirements', 'condition'], '阶段入口', notes);
+        var overrideIds = stagedAliasValue(item, ['override_condition_ids', 'overrideConditionIds', 'override_ids', 'overrideIds', 'overrides'], '阶段越闸条件', notes);
+        return {
+            stage_id: canonicalStagedStage(stage),
+            entry: normalizeStagedPlanEntry(entry, item, notes),
+            override_condition_ids: stagedIdList(overrideIds, '阶段越闸条件'),
+            clue_ids: []
+        };
+    }
+
+    function normalizeStagedLayerPlans(value, notes) {
+        if (isObject(value)) {
+            var wrapped = stagedAliasValue(value, ['items', 'plans', 'stageList', 'stages'], '阶段计划列表', notes);
+            if (wrapped !== MISSING) value = wrapped;
+        }
+        var source = value;
+        var stageKeys = null;
+        if (isObject(source)) {
+            stageKeys = Object.keys(source);
+            var mapped = [];
+            for (var m = 0; m < stageKeys.length; m++) mapped.push(source[stageKeys[m]]);
+            source = mapped;
+            stagedRepairNote(notes, '按档位命名的阶段字典已转成标准列表');
+        }
+        if (!isArray(source)) return [];
+        var byStage = {};
+        for (var i = 0; i < source.length; i++) {
+            var plan = normalizeStagedPlanItem(source[i], stageKeys && stageKeys[i], notes);
+            if (byStage[plan.stage_id] && !sameRawValue(byStage[plan.stage_id], plan)) stagedShapeError('含两份互相冲突的 ' + plan.stage_id + ' 阶段计划');
+            byStage[plan.stage_id] = plan;
+        }
+        var out = [];
+        var keys = Object.keys(byStage);
+        for (var k = 0; k < keys.length; k++) out.push(byStage[keys[k]]);
+        return out;
+    }
+
+    function normalizeStagedPlans(value, notes) {
+        var byLayer = { fact: [], motive: [], emotion: [] };
+        if (value === MISSING || value === null || value === undefined) return byLayer;
+        if (isObject(value)) {
+            var wrapped = stagedAliasValue(value, ['items', 'plans', 'layerPlans', 'layers'], '分层计划', notes);
+            if (wrapped !== MISSING) value = wrapped;
+        }
+        if (isArray(value)) {
+            var flat = value;
+            var buckets = { fact: [], motive: [], emotion: [] };
+            for (var f = 0; f < flat.length; f++) {
+                if (!isObject(flat[f])) stagedShapeError('里的扁平阶段计划缺少层信息');
+                var flatLayer = stagedAliasValue(flat[f], ['layer', 'onion_layer', 'onionLayer', 'truth_layer', 'truthLayer'], '阶段所属层', notes);
+                var canonicalLayer = canonicalStagedLayer(flatLayer);
+                if (LAYERS.indexOf(canonicalLayer) < 0) stagedShapeError('里的扁平阶段计划缺少合法层信息');
+                var copy = clone(flat[f]);
+                delete copy.layer; delete copy.onion_layer; delete copy.onionLayer; delete copy.truth_layer; delete copy.truthLayer;
+                buckets[canonicalLayer].push(copy);
+            }
+            value = buckets;
+            stagedRepairNote(notes, '扁平 stage_plans 已按洋葱层归位');
+        }
+        if (!isObject(value)) return byLayer;
+        var sourceKeys = Object.keys(value);
+        for (var i = 0; i < sourceKeys.length; i++) {
+            var layer = canonicalStagedLayer(sourceKeys[i]);
+            if (LAYERS.indexOf(layer) < 0) continue;
+            var plans = normalizeStagedLayerPlans(value[sourceKeys[i]], notes);
+            if (byLayer[layer].length && !sameRawValue(byLayer[layer], plans)) stagedShapeError('含两份互相冲突的 ' + layer + ' 阶段计划');
+            byLayer[layer] = plans;
+            if (sourceKeys[i] !== layer) stagedRepairNote(notes, '阶段层名“' + sourceKeys[i] + '”已翻译成“' + layer + '”');
+        }
+        return byLayer;
+    }
+
+    function inferMissingConditionTargets(conditions, plansByLayer, notes) {
+        var refs = {};
+        for (var l = 0; l < LAYERS.length; l++) {
+            var layer = LAYERS[l];
+            var plans = plansByLayer[layer] || [];
+            for (var p = 0; p < plans.length; p++) {
+                var ids = plans[p].entry && plans[p].entry.condition_ids || [];
+                for (var r = 0; r < ids.length; r++) {
+                    if (!refs[ids[r]]) refs[ids[r]] = [];
+                    var cell = layer + '|' + plans[p].stage_id;
+                    if (refs[ids[r]].indexOf(cell) < 0) refs[ids[r]].push(cell);
+                }
+            }
+        }
+        for (var c = 0; c < conditions.length; c++) {
+            var condition = conditions[c];
+            if (condition.target && LAYERS.indexOf(condition.target.layer) >= 0 && STAGES.indexOf(condition.target.stage) >= 0) continue;
+            var cells = refs[condition.cond_id] || [];
+            if (cells.length !== 1) continue;
+            var parts = cells[0].split('|');
+            condition.target = { layer: parts[0], stage: parts[1] };
+            stagedRepairNote(notes, '条件 ' + condition.cond_id + ' 的目标已从唯一引用门补回');
+        }
+    }
+
+    function completeStagedPlans(plansByLayer, conditions, claims, notes) {
+        var claimsKnown = isArray(claims);
+        for (var l = 0; l < LAYERS.length; l++) {
+            var layer = LAYERS[l];
+            var hasClaims = false;
+            var current = plansByLayer[layer] || [];
+            if (claimsKnown) {
+                for (var c = 0; c < claims.length; c++) if (claims[c] && claims[c].layer === layer) hasClaims = true;
+            } else hasClaims = current.length > 0;
+            var map = indexBy(current, 'stage_id');
+            if (!hasClaims) {
+                if (current.length) stagedRepairNote(notes, layer + ' 层没有真相命题，多余阶段已安全收回');
+                plansByLayer[layer] = [];
+                continue;
+            }
+            var completed = [];
+            for (var s = 0; s < STAGES.length; s++) {
+                var stage = STAGES[s];
+                var matching = [];
+                var matchingOverrides = [];
+                for (var k = 0; k < conditions.length; k++) {
+                    var target = conditions[k] && conditions[k].target;
+                    if (target && target.layer === layer && target.stage === stage) {
+                        matching.push(conditions[k].cond_id);
+                        var overrideTargets = conditions[k].override_targets || [];
+                        for (var ot = 0; ot < overrideTargets.length; ot++) {
+                            if (overrideTargets[ot] && overrideTargets[ot].layer === layer && stageIndex(overrideTargets[ot].max_stage) >= s) {
+                                matchingOverrides.push(conditions[k].cond_id);
+                                break;
+                            }
+                        }
+                    }
+                }
+                var plan = map[stage] || {
+                    stage_id: stage,
+                    entry: { condition_ids: matching, logic: 'all' },
+                    override_condition_ids: matchingOverrides, clue_ids: []
+                };
+                if (!map[stage]) stagedRepairNote(notes, layer + '/' + stage + ' 阶段已按条件目标本地接线');
+                if (plan.entry && !plan.entry.condition_ids.length && matching.length) {
+                    plan.entry.condition_ids = uniqueStrings(matching);
+                    stagedRepairNote(notes, layer + '/' + stage + ' 缺失的条件引用已按明确 target 补回');
+                }
+                if (!plan.override_condition_ids.length && matchingOverrides.length) {
+                    plan.override_condition_ids = uniqueStrings(matchingOverrides);
+                    stagedRepairNote(notes, layer + '/' + stage + ' 的显式越闸条件已按 condition.override_targets 接回');
+                }
+                plan.clue_ids = [];
+                completed.push(plan);
+            }
+            plansByLayer[layer] = completed;
+        }
+        return plansByLayer;
+    }
+
+    function unwrapStagedStructure(raw, notes) {
+        if (!isObject(raw)) return raw;
+        var topKeys = ['conditions', 'condition_list', 'conditionList', 'causal_conditions', 'causalConditions', 'gates', 'gate_conditions', 'gateConditions', '条件',
+            'stage_plans', 'stagePlans', 'stage_plan', 'stagePlan', 'plans', 'layer_plans', 'layerPlans', 'stages_by_layer', 'stagesByLayer', 'progression', '阶段计划'];
+        for (var i = 0; i < topKeys.length; i++) if (Object.prototype.hasOwnProperty.call(raw, topKeys[i])) return raw;
+        var wrapped = stagedAliasValue(raw, ['result', 'data', 'output', 'causal_structure', 'causalStructure', '因果结构'], '返回外壳', notes);
+        if (wrapped !== MISSING && isObject(wrapped)) {
+            stagedRepairNote(notes, '模型多包的一层结果外壳已安全拆开');
+            return wrapped;
+        }
+        return raw;
+    }
+
+    function prepareStagedStructurePart(raw, claims, notes) {
+        var source = unwrapStagedStructure(clone(raw || {}), notes);
+        var conditionsRaw = stagedAliasValue(source, ['conditions', 'condition_list', 'conditionList', 'causal_conditions', 'causalConditions', 'gates', 'gate_conditions', 'gateConditions', '条件'], 'conditions', notes);
+        var plansRaw = stagedAliasValue(source, ['stage_plans', 'stagePlans', 'stage_plan', 'stagePlan', 'plans', 'layer_plans', 'layerPlans', 'stages_by_layer', 'stagesByLayer', 'progression', '阶段计划'], 'stage_plans', notes);
+        if (conditionsRaw === MISSING) stagedShapeError('没有交回可判定的 conditions，不能凭空替 God 发明因果');
+        var conditions = normalizeStagedConditions(conditionsRaw, notes);
+        var plansByLayer = normalizeStagedPlans(plansRaw, notes);
+        inferMissingConditionTargets(conditions, plansByLayer, notes);
+        plansByLayer = completeStagedPlans(plansByLayer, conditions, claims, notes);
+        return normalizeStagedConditionSpecs({ conditions: conditions, stage_plans: plansByLayer });
+    }
+
+    function ensureStagedStructurePart(text, claims, notes) {
+        return prepareStagedStructurePart(extractJson(text), claims, notes);
     }
 
     function allocateSmartClueIds(draft, expectedIds) {
@@ -4091,7 +4551,9 @@
                 };
                 return callStagedPart('步骤2 因果结构', stagedStructurePrompt(mode, schema), payload, schema, reports, telemetryObserver, 9000)
                     .then(function (text) {
-                        var raw = prepareStagedStructurePart(ensureStageObject(text, ['conditions', 'stage_plans'], '因果结构步骤'));
+                        var repairNotes = [];
+                        var raw = ensureStagedStructurePart(text, current.claims, repairNotes);
+                        attachCompileRepairs(reports, '步骤2 因果结构', repairNotes, telemetryObserver);
                         var next = mergeStagePart(current, raw, ['conditions', 'stage_plans'], '因果结构步骤');
                         if (mode === 'smart_dispatch') allocateSmartClueIds(next, plannedIds);
                         return saveStep(next);
@@ -7710,7 +8172,7 @@
     }
 
     function init() {
-        console.log('[Luciole] v1.6.17 init 开始');
+        console.log('[Luciole] v1.6.18 init 开始');
         var c;
         try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
         try {
@@ -7737,7 +8199,7 @@
         if (t.WORLDINFO_SETTINGS_UPDATED) ev.on(t.WORLDINFO_SETTINGS_UPDATED, onSafetySourceChanged);
         if (t.PERSONA_CHANGED) ev.on(t.PERSONA_CHANGED, onSafetySourceChanged);
         if (t.CHARACTER_EDITED) ev.on(t.CHARACTER_EDITED, onSafetySourceChanged);
-        console.log('[Luciole] v1.6.17 三轨点灯 · 干净编译航道');
+        console.log('[Luciole] v1.6.18 三轨点灯 · 宽口编译器');
     }
 
     if (typeof window !== 'undefined' && window.__LUCIOLE_TEST__) {
@@ -7839,9 +8301,11 @@
             stagedSafePrompt: stagedSafePrompt,
             stagedCluePrompt: stagedCluePrompt,
             claimsForAssignment: claimsForAssignment,
+            ensureStageObject: ensureStageObject,
             stagedStructurePrompt: stagedStructurePrompt,
             stagedStructureSchema: stagedStructureSchema,
             prepareStagedStructurePart: prepareStagedStructurePart,
+            ensureStagedStructurePart: ensureStagedStructurePart,
             allocateSmartClueIds: allocateSmartClueIds,
             smartAssignments: smartAssignments,
             persistCompileCheckpoint: persistCompileCheckpoint,
