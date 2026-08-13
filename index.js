@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.19 — 上帝视角剧本引擎 · 开幕观察窗
+ * Luciole v1.6.20 — 上帝视角剧本引擎 · 宽时运行闸
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -28,7 +28,9 @@
         'conditions_met', 'evidence_direct', 'retry_undelivered'];
     var MISSING = { __luciole_missing: true };
     var FOCUS_PACKET_BUDGET = 760;
-    var RUNTIME_TIMEOUT_MS = 20000;
+    var DEFAULT_RUNTIME_TIMEOUT_SECONDS = 120;
+    var MIN_RUNTIME_TIMEOUT_SECONDS = 20;
+    var MAX_RUNTIME_TIMEOUT_SECONDS = 600;
     var COMPILE_TIMEOUT_MS = 500000;
     var COMPILE_ROUTE_TEST_TIMEOUT_MS = 120000;
     var MAX_STREAM_BYTES = 2097152;
@@ -63,7 +65,7 @@
             api: {
                 profiles: [],
                 compiler: { mode: 'current', activeIndex: -1, stProfileId: '' },
-                runtime: { mode: 'follow_compiler', activeIndex: -1, stProfileId: '' },
+                runtime: { mode: 'follow_compiler', activeIndex: -1, stProfileId: '', timeoutSeconds: DEFAULT_RUNTIME_TIMEOUT_SECONDS },
                 clueWriterRoute: 'runtime',
                 capabilityProbes: {}
             },
@@ -86,10 +88,12 @@
         if (['current', 'st_profile', 'custom'].indexOf(value.compiler.mode) < 0) value.compiler.mode = 'current';
         if (typeof value.compiler.activeIndex !== 'number') value.compiler.activeIndex = -1;
         value.compiler.stProfileId = trim(value.compiler.stProfileId || '');
-        if (!isObject(value.runtime)) value.runtime = { mode: 'follow_compiler', activeIndex: -1, stProfileId: '' };
+        if (!isObject(value.runtime)) value.runtime = { mode: 'follow_compiler', activeIndex: -1, stProfileId: '', timeoutSeconds: DEFAULT_RUNTIME_TIMEOUT_SECONDS };
         if (['follow_compiler', 'current', 'st_profile', 'custom'].indexOf(value.runtime.mode) < 0) value.runtime.mode = 'follow_compiler';
         if (typeof value.runtime.activeIndex !== 'number') value.runtime.activeIndex = -1;
         value.runtime.stProfileId = trim(value.runtime.stProfileId || '');
+        value.runtime.timeoutSeconds = clamp(parseInt(value.runtime.timeoutSeconds, 10) || DEFAULT_RUNTIME_TIMEOUT_SECONDS,
+            MIN_RUNTIME_TIMEOUT_SECONDS, MAX_RUNTIME_TIMEOUT_SECONDS);
         if (value.clueWriterRoute !== 'compiler' && value.clueWriterRoute !== 'runtime') value.clueWriterRoute = 'runtime';
         if (!isObject(value.capabilityProbes)) value.capabilityProbes = {};
         /* v1.5 UI 兼容别名；真正调用只读 compiler/runtime。 */
@@ -129,6 +133,12 @@
     function save() {
         saveSettingsOnly();
         saveChatOnly();
+    }
+
+    function runtimeTimeoutMs() {
+        var api = settings().api;
+        var seconds = api && api.runtime ? parseInt(api.runtime.timeoutSeconds, 10) : DEFAULT_RUNTIME_TIMEOUT_SECONDS;
+        return clamp(seconds || DEFAULT_RUNTIME_TIMEOUT_SECONDS, MIN_RUNTIME_TIMEOUT_SECONDS, MAX_RUNTIME_TIMEOUT_SECONDS) * 1000;
     }
 
     function rawChatId() {
@@ -1469,10 +1479,11 @@
     }
 
     function timeoutError(timeoutMs, scope) {
-        var seconds = Math.max(1, Math.round((timeoutMs || RUNTIME_TIMEOUT_MS) / 1000));
+        var fallbackMs = DEFAULT_RUNTIME_TIMEOUT_SECONDS * 1000;
+        var seconds = Math.max(1, Math.round((timeoutMs || fallbackMs) / 1000));
         var error = new Error('请求超过' + seconds + '秒，已停止等待');
         error.code = 'LUCIOLE_TIMEOUT';
-        error.timeout_ms = timeoutMs || RUNTIME_TIMEOUT_MS;
+        error.timeout_ms = timeoutMs || fallbackMs;
         error.timeout_scope = scope || 'runtime';
         error.operation_scope = scope || 'runtime';
         return error;
@@ -5038,6 +5049,8 @@
                     interval: interval,
                     /* 点亮后的下一轮先开一次观察窗，此后再按 interval 排程。 */
                     next_due_round: 1,
+                    opening_window_version: 1,
+                    failure_retry_version: 1,
                     clue_strength: strength,
                     planned_total_rounds: plannedRounds,
                     planned_drop_count: plannedDrops,
@@ -5097,6 +5110,8 @@
                 story_round: 0,
                 interval: 10,
                 next_due_round: ladder.meta.schedule_source === 'user_interval' ? 1 : 10,
+                opening_window_version: 1,
+                failure_retry_version: 1,
                 clue_strength: ladder.meta.clue_strength,
                 planned_total_rounds: null,
                 planned_drop_count: null,
@@ -5119,6 +5134,9 @@
         if (typeof schedule.story_round !== 'number') schedule.story_round = 0;
         schedule.interval = clamp(parseInt(schedule.interval, 10) || 10, 1, 9999);
         if (typeof schedule.next_due_round !== 'number') schedule.next_due_round = schedule.interval;
+        if (!schedule.calls) schedule.calls = { planned: 0, event: 0, manual: 0, timeout: 0, rejected: 0 };
+        var callKeys = ['planned', 'event', 'manual', 'timeout', 'rejected'];
+        for (var ck = 0; ck < callKeys.length; ck++) if (typeof schedule.calls[callKeys[ck]] !== 'number') schedule.calls[callKeys[ck]] = 0;
         /*
          * v1.6.18 及更早的新式排程把第一个窗口放在 interval，造成点亮后的开幕空窗。
          * 只迁移尚未发生任何运行调用的故事线；已经开演的线绝不静默改节奏。
@@ -5134,12 +5152,22 @@
             }
             schedule.opening_window_version = 1;
         }
+        /*
+         * v1.6.19 以前运行失败也会误消费整个窗口。若这条线至今所有运行调用都失败，
+         * 把下一次处理拉回到下一轮；不重放当前正文，也不伪造一次成功裁定。
+         */
+        if (!schedule.failure_retry_version) {
+            var historicalAttempts = (schedule.calls.planned || 0) + (schedule.calls.event || 0) + (schedule.calls.manual || 0);
+            var historicalFailures = (schedule.calls.timeout || 0) + (schedule.calls.rejected || 0);
+            if (ladder.meta.schedule_source === 'user_interval' && historicalAttempts > 0 && historicalFailures >= historicalAttempts &&
+                !ladder.runtime.pending && !Object.keys(ladder.runtime.disclosures || {}).length) {
+                schedule.next_due_round = Math.max(1, schedule.story_round + 1);
+            }
+            schedule.failure_retry_version = 1;
+        }
         if (STRENGTHS.indexOf(schedule.clue_strength) < 0) schedule.clue_strength = ladder.meta.clue_strength;
         if (typeof schedule.seed_cursor !== 'number') schedule.seed_cursor = 0;
         if (typeof schedule.exhausted !== 'boolean') schedule.exhausted = false;
-        if (!schedule.calls) schedule.calls = { planned: 0, event: 0, manual: 0, timeout: 0, rejected: 0 };
-        var callKeys = ['planned', 'event', 'manual', 'timeout', 'rejected'];
-        for (var ck = 0; ck < callKeys.length; ck++) if (typeof schedule.calls[callKeys[ck]] !== 'number') schedule.calls[callKeys[ck]] = 0;
         ladder.meta.protected = true;
         return ladder;
     }
@@ -5346,6 +5374,13 @@
         schedule.attention_flag = false;
         schedule.retry_next_turn = false;
         ladder.runtime.manual_wake = false;
+    }
+
+    function recordRuntimeFailure(ladder, error) {
+        if (!ladder || !ladder.runtime || !ladder.runtime.schedule || (error && error.code === 'LUCIOLE_STALE')) return;
+        if (error && error.code === 'LUCIOLE_TIMEOUT') ladder.runtime.schedule.calls.timeout += 1;
+        else ladder.runtime.schedule.calls.rejected += 1;
+        /* next_due_round、attention_flag 与 manual_wake 都保持原状，保证下一轮仍有出口。 */
     }
 
     function planAllowsClue(layerState, clue) {
@@ -5995,7 +6030,7 @@
     }
 
     function askSupervisorGod(ladder, gc) {
-        return callModel(supervisorSystemPrompt(), supervisorPayload(ladder, gc), 2200, 0.1, 'runtime', RUNTIME_TIMEOUT_MS).then(function (text) {
+        return callModel(supervisorSystemPrompt(), supervisorPayload(ladder, gc), 2200, 0.1, 'runtime', runtimeTimeoutMs()).then(function (text) {
             var checked = validateSupervisorDecision(ladder, extractJson(text), gc);
             if (checked.errors.length) {
                 audit(ladder, 'schema_reject', { errors: checked.errors, mode: 'god_supervised' });
@@ -6006,7 +6041,7 @@
     }
 
     function askRuntimeGod(ladder, gc) {
-        return callModel(schedulerSystemPrompt(), schedulerPayload(ladder, gc), 1800, 0, 'runtime', RUNTIME_TIMEOUT_MS).then(function (text) {
+        return callModel(schedulerSystemPrompt(), schedulerPayload(ladder, gc), 1800, 0, 'runtime', runtimeTimeoutMs()).then(function (text) {
             var raw = extractJson(text);
             var checked = validateGodDecision(ladder, raw, gc);
             if (checked.errors.length) {
@@ -6879,13 +6914,10 @@
         }).catch(function (err) {
             request.expired = true;
             discardTemporaryClueForRequest(ladder, request);
-            if (ladder.runtime.active_request && ladder.runtime.active_request.request_id === request.request_id && (!err || err.code !== 'LUCIOLE_STALE')) {
-                consumeScheduleWindow(ladder, kind);
-                ladder.runtime.active_request = null;
-            }
+            /* 失败不再消费调度窗口：本轮安全放行，下一轮仍会重试同一到期窗口。 */
+            if (ladder.runtime.active_request && ladder.runtime.active_request.request_id === request.request_id && (!err || err.code !== 'LUCIOLE_STALE')) ladder.runtime.active_request = null;
             if (ladder.runtime.active_request && ladder.runtime.active_request.request_id === request.request_id) ladder.runtime.active_request = null;
-            if (err && err.code === 'LUCIOLE_TIMEOUT') ladder.runtime.schedule.calls.timeout += 1;
-            else if (!err || err.code !== 'LUCIOLE_STALE') ladder.runtime.schedule.calls.rejected += 1;
+            recordRuntimeFailure(ladder, err);
             audit(ladder, 'god_error', { message: err && err.message ? err.message : String(err) });
             if (err && err.code === 'LUCIOLE_STALE') {
                 finishDiagnostic(runtimeToken, 'info', '聊天或重抽分支已经变化，迟到回包已安全丢弃。', operationErrorDetail(err), runtimeMeta);
@@ -6984,6 +7016,7 @@
         '    <label><input type="radio" name="xyh_runtime_api_mode" value="custom"> 独立轻量 API</label></div>' +
         '   <label id="xyh_st_runtime_wrap" class="xyh-stack-label" style="display:none;"><span>运行连接配置</span><select id="xyh_st_runtime_profile" class="xyh-select"></select></label>' +
         '   <select id="xyh_runtime_api_select" class="xyh-select" style="display:none;"></select>' +
+        '   <label class="xyh-stack-label"><span>运行等待上限（秒）</span><input type="number" id="xyh_runtime_timeout" min="20" max="600" step="10" value="120"><small>中转较慢可调到 180–300 秒；超时会安全放行，且不跳过下一次调度。</small></label>' +
         '   <div id="xyh_st_profile_status" class="xyh-route-note" style="display:none;"></div>' +
         '  </div>' +
         '  <div class="xyh-row xyh-card xyh-diagnostics" id="xyh_diagnostics">' +
@@ -7839,6 +7872,7 @@
         $('#xyh_st_compiler_wrap').toggle(api.compiler.mode === 'st_profile');
         $('#xyh_st_runtime_wrap').toggle(api.runtime.mode === 'st_profile');
         $('#xyh_clue_use_runtime').prop('checked', api.clueWriterRoute === 'runtime');
+        $('#xyh_runtime_timeout').val(api.runtime.timeoutSeconds);
         renderConnectionProfileSelect($('#xyh_st_compiler_profile'), api.compiler.stProfileId);
         renderConnectionProfileSelect($('#xyh_st_runtime_profile'), api.runtime.stProfileId);
         var sel = $('#xyh_api_select');
@@ -7880,7 +7914,7 @@
             onTelemetry: function (row) { testTelemetry = normalizeCompileTelemetry(row); }
         };
         if (button && button.length) button.prop('disabled', true).text('连接中……');
-        var testTimeout = kind === 'compiler' ? COMPILE_ROUTE_TEST_TIMEOUT_MS : RUNTIME_TIMEOUT_MS;
+        var testTimeout = kind === 'compiler' ? COMPILE_ROUTE_TEST_TIMEOUT_MS : runtimeTimeoutMs();
         var canaryPrompt = kind === 'compiler'
             ? '你是 Luciole 的连接实弹测试。只输出一个 JSON 对象：{"luciole":"ok"}。不要解释，不要 Markdown。'
             : '你是 Luciole 的连接测试。只回复“通”。';
@@ -7956,6 +7990,14 @@
         $('#xyh_runtime_api_select').on('change', function () {
             settings().api.runtime.activeIndex = parseInt($(this).val(), 10);
             save();
+        });
+        $('#xyh_runtime_timeout').on('change', function () {
+            var seconds = clamp(parseInt($(this).val(), 10) || DEFAULT_RUNTIME_TIMEOUT_SECONDS,
+                MIN_RUNTIME_TIMEOUT_SECONDS, MAX_RUNTIME_TIMEOUT_SECONDS);
+            settings().api.runtime.timeoutSeconds = seconds;
+            $(this).val(seconds);
+            save();
+            toast('运行等待上限已设为 ' + seconds + ' 秒', 'success');
         });
         $('#xyh_api_save').on('click', function () {
             var api = settings().api;
@@ -8328,6 +8370,8 @@
             chatKeyForTests: chatKey,
             persistChatStoreForTests: persistChatStore,
             normalizeApiSettings: normalizeApiSettings,
+            normalizeLadderRuntime: normalizeLadderRuntime,
+            runtimeTimeoutMs: runtimeTimeoutMs,
             normalizeDiagnosticSettings: normalizeDiagnosticSettings,
             sanitizeDiagnosticText: sanitizeDiagnosticText,
             safeEndpoint: safeEndpoint,
@@ -8389,6 +8433,7 @@
             intervalDue: intervalDue,
             notePlayerAttention: notePlayerAttention,
             consumeScheduleWindow: consumeScheduleWindow,
+            recordRuntimeFailure: recordRuntimeFailure,
             uniformDecision: uniformDecision,
             scheduleEstimate: scheduleEstimate,
             smartRefillSystemPrompt: smartRefillSystemPrompt,
