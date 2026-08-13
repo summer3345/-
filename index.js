@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.21 — 上帝视角剧本引擎 · 开幕第一束光
+ * Luciole v1.6.22 — 上帝视角剧本引擎 · 开幕解闸
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -5052,6 +5052,7 @@
                     opening_window_version: 1,
                     failure_retry_version: 1,
                     opening_seed_policy_version: 1,
+                    opening_gate_policy_version: 1,
                     clue_strength: strength,
                     planned_total_rounds: plannedRounds,
                     planned_drop_count: plannedDrops,
@@ -5114,6 +5115,7 @@
                 opening_window_version: 1,
                 failure_retry_version: 1,
                 opening_seed_policy_version: 1,
+                opening_gate_policy_version: 1,
                 clue_strength: ladder.meta.clue_strength,
                 planned_total_rounds: null,
                 planned_drop_count: null,
@@ -5175,6 +5177,20 @@
                 schedule.next_due_round = Math.max(1, schedule.story_round + 1);
             }
             schedule.opening_seed_policy_version = 1;
+        }
+        /*
+         * v1.6.21 的开幕窗口即使成功完成调度，也可能因为 trace 入口被误锁而只能 hold。
+         * 升级后把这种“分析成功但一束光也没交付”的旧窗口拉回下一轮；仅迁移一次。
+         */
+        if (!schedule.opening_gate_policy_version) {
+            var lastGateDecision = ladder.derived && ladder.derived.last_decision;
+            var lastGatePacket = lastGateDecision && lastGateDecision.packet_plan;
+            var lastGateReleased = !!(lastGatePacket && (lastGatePacket.release_clue_id !== null && lastGatePacket.release_clue_id !== undefined));
+            if (mode === 'smart_dispatch' && !hasDeliveredRuntimeClue(ladder) && !ladder.runtime.pending &&
+                lastGateDecision && !lastGateReleased) {
+                schedule.next_due_round = Math.max(1, schedule.story_round + 1);
+            }
+            schedule.opening_gate_policy_version = 1;
         }
         if (STRENGTHS.indexOf(schedule.clue_strength) < 0) schedule.clue_strength = ladder.meta.clue_strength;
         if (typeof schedule.seed_cursor !== 'number') schedule.seed_cursor = 0;
@@ -5416,10 +5432,11 @@
             if (pendingId && pendingId === clue.clue_id) continue;
             var current = stageIndex(layerState.stage);
             var target = stageIndex(clue.stage);
+            var openingTrace = isOpeningTraceTransition(ladder, clue.layer, layerState.stage, clue.stage);
             var legal = target <= current && paceReady(layerState, stagePlan(layerState, clue.stage));
             if (!legal && target === current + 1) {
                 var nextPlan = stagePlan(layerState, clue.stage);
-                legal = entryMet(ladder, nextPlan, localChanges, []) && paceReady(layerState, nextPlan);
+                legal = openingTrace || (entryMet(ladder, nextPlan, localChanges, []) && paceReady(layerState, nextPlan));
             }
             if (legal) out.push(clone(clue));
         }
@@ -5489,7 +5506,8 @@
             if (current < STAGES.length - 1) {
                 var nextStage = STAGES[current + 1];
                 var nextPlan = stagePlan(state, nextStage);
-                if (entryMet(ladder, nextPlan, localChanges, [])) {
+                if (entryMet(ladder, nextPlan, localChanges, []) ||
+                    (isOpeningTraceTransition(ladder, layer, state.stage, nextStage) && hasOpeningTraceClue(ladder, layer))) {
                     out.push({ layer: layer, from: state.stage, to: nextStage, via: 'adjacent' });
                 }
             }
@@ -5746,14 +5764,43 @@
         return false;
     }
 
-    function openingSeedRequired(ladder, gc) {
+    function openingSeedWindow(ladder) {
         return !!(ladder && ladder.meta && ladder.meta.schedule_mode === 'smart_dispatch' &&
-            !hasDeliveredRuntimeClue(ladder) && gc && gc.candidate_view && gc.candidate_view.length);
+            ladder.meta.schedule_source === 'user_interval' && ladder.runtime && !ladder.runtime.pending &&
+            !hasDeliveredRuntimeClue(ladder));
+    }
+
+    function isOpeningTraceTransition(ladder, layer, from, to) {
+        return !!(openingSeedWindow(ladder) && LAYERS.indexOf(layer) >= 0 && from === 'dormant' && to === 'trace');
+    }
+
+    function openingTraceClueUsable(ladder, clue, layer) {
+        if (!clue || clue.dynamic || clue.layer !== layer || clue.stage !== 'trace' || disclosureDelivered(ladder, clue.clue_id)) return false;
+        var layerState = ladder.runtime.layers[layer];
+        if (!layerState || !layerState.active || !planAllowsClue(layerState, clue) || !crossLayerClaimsReady(ladder, clue)) return false;
+        var strengthCap = STRENGTH_CAPS[ladder.runtime.schedule.clue_strength] || 2;
+        if ((clue.allowed_claim_ids || []).length > strengthCap) return false;
+        if (ladder.runtime.schedule.clue_strength === 'subtle' && ['observation', 'rumor'].indexOf(clue.nature) < 0) return false;
+        return true;
+    }
+
+    function hasOpeningTraceClue(ladder, layer) {
+        if (!isOpeningTraceTransition(ladder, layer, 'dormant', 'trace')) return false;
+        var clues = ladder.safe_store && ladder.safe_store.clues || [];
+        for (var i = 0; i < clues.length; i++) if (openingTraceClueUsable(ladder, clues[i], layer)) return true;
+        return false;
+    }
+
+    function openingSeedRequired(ladder, gc) {
+        return !!(openingSeedWindow(ladder) && gc && gc.candidate_view && gc.candidate_view.length);
     }
 
     function enforceOpeningSeedDecision(ladder, raw, gc) {
-        if (!openingSeedRequired(ladder, gc) || !isObject(raw) || !isObject(raw.verdict) || raw.verdict.action !== 'hold' ||
+        if (!openingSeedRequired(ladder, gc) || !isObject(raw) || !isObject(raw.verdict) ||
             !isObject(raw.patch) || !isObject(raw.packet_plan)) return raw;
+        var alreadyReleasing = raw.packet_plan.release_clue_id !== null || raw.packet_plan.release_variant_id !== null ||
+            raw.packet_plan.release_policy !== null;
+        if (alreadyReleasing) return raw;
         var view = gc.candidate_view[0];
         var clue = null;
         for (var c = 0; c < (gc.candidates || []).length; c++) if (gc.candidates[c].clue_id === view.clue_id) { clue = gc.candidates[c]; break; }
@@ -5876,8 +5923,10 @@
             if (move.via === 'adjacent') {
                 if (stageIndex(move.to) !== stageIndex(move.from) + 1) errors.push('adjacent 必须前进一档');
                 var targetPlan = stagePlan(ls, move.to);
-                if (!entryMet(ladder, targetPlan, gc.local_changes, d.patch.condition_verdicts)) errors.push('目标阶段 entry 未满足');
-                if (!paceReady(ls, targetPlan)) errors.push('目标阶段 min_gap 未满足');
+                var openingTraceMove = isOpeningTraceTransition(ladder, move.layer, move.from, move.to) &&
+                    hasOpeningTraceClue(ladder, move.layer);
+                if (!openingTraceMove && !entryMet(ladder, targetPlan, gc.local_changes, d.patch.condition_verdicts)) errors.push('目标阶段 entry 未满足');
+                if (!openingTraceMove && !paceReady(ls, targetPlan)) errors.push('目标阶段 min_gap 未满足');
             } else {
                 var cond = ladder.runtime.conditions[move.override_cond_id];
                 if ((gc.override_ids || []).indexOf(move.override_cond_id) < 0) errors.push('override condition 不在本轮白名单');
@@ -8338,7 +8387,7 @@
     }
 
     function init() {
-        console.log('[Luciole] v1.6.18 init 开始');
+        console.log('[Luciole] v1.6.22 init 开始');
         var c;
         try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
         try {
@@ -8365,7 +8414,7 @@
         if (t.WORLDINFO_SETTINGS_UPDATED) ev.on(t.WORLDINFO_SETTINGS_UPDATED, onSafetySourceChanged);
         if (t.PERSONA_CHANGED) ev.on(t.PERSONA_CHANGED, onSafetySourceChanged);
         if (t.CHARACTER_EDITED) ev.on(t.CHARACTER_EDITED, onSafetySourceChanged);
-        console.log('[Luciole] v1.6.18 三轨点灯 · 宽口编译器');
+        console.log('[Luciole] v1.6.22 三轨点灯 · 开幕解闸');
     }
 
     if (typeof window !== 'undefined' && window.__LUCIOLE_TEST__) {
