@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.5 — 上帝视角剧本引擎 · 三轨播种
+ * Luciole v1.6.6 — 上帝视角剧本引擎 · 三轨播种
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -28,6 +28,7 @@
     var FOCUS_PACKET_BUDGET = 760;
     var RUNTIME_TIMEOUT_MS = 20000;
     var COMPILE_TIMEOUT_MS = 500000;
+    var COMPILE_ROUTE_TEST_TIMEOUT_MS = 120000;
     var MAX_STREAM_BYTES = 2097152;
     var SMART_STAGE_BATCH_SIZE = 8;
     var UNIFORM_STAGE_BATCH_SIZE = 25;
@@ -53,8 +54,8 @@
             theme: 'dark',
             api: {
                 profiles: [],
-                compiler: { mode: 'current', activeIndex: -1 },
-                runtime: { mode: 'follow_compiler', activeIndex: -1 }
+                compiler: { mode: 'current', activeIndex: -1, stProfileId: '' },
+                runtime: { mode: 'follow_compiler', activeIndex: -1, stProfileId: '' }
             },
             diagnostics: { entries: [] },
             chats: {}
@@ -67,14 +68,17 @@
         if (!isObject(value.compiler)) {
             value.compiler = {
                 mode: value.mode === 'custom' ? 'custom' : 'current',
-                activeIndex: typeof value.activeIndex === 'number' ? value.activeIndex : -1
+                activeIndex: typeof value.activeIndex === 'number' ? value.activeIndex : -1,
+                stProfileId: ''
             };
         }
-        if (value.compiler.mode !== 'custom') value.compiler.mode = 'current';
+        if (['current', 'st_profile', 'custom'].indexOf(value.compiler.mode) < 0) value.compiler.mode = 'current';
         if (typeof value.compiler.activeIndex !== 'number') value.compiler.activeIndex = -1;
-        if (!isObject(value.runtime)) value.runtime = { mode: 'follow_compiler', activeIndex: -1 };
-        if (['follow_compiler', 'current', 'custom'].indexOf(value.runtime.mode) < 0) value.runtime.mode = 'follow_compiler';
+        value.compiler.stProfileId = trim(value.compiler.stProfileId || '');
+        if (!isObject(value.runtime)) value.runtime = { mode: 'follow_compiler', activeIndex: -1, stProfileId: '' };
+        if (['follow_compiler', 'current', 'st_profile', 'custom'].indexOf(value.runtime.mode) < 0) value.runtime.mode = 'follow_compiler';
         if (typeof value.runtime.activeIndex !== 'number') value.runtime.activeIndex = -1;
+        value.runtime.stProfileId = trim(value.runtime.stProfileId || '');
         /* v1.5 UI 兼容别名；真正调用只读 compiler/runtime。 */
         value.mode = value.compiler.mode;
         value.activeIndex = value.compiler.activeIndex;
@@ -187,6 +191,21 @@
     function isArray(v) { return Object.prototype.toString.call(v) === '[object Array]'; }
     function isObject(v) { return !!v && typeof v === 'object' && !isArray(v); }
     function trim(v) { return String(v == null ? '' : v).replace(/^\s+|\s+$/g, ''); }
+    function utf8ByteLength(value) {
+        var text = String(value == null ? '' : value);
+        var bytes = 0;
+        for (var i = 0; i < text.length; i++) {
+            var code = text.charCodeAt(i);
+            if (code < 128) bytes += 1;
+            else if (code < 2048) bytes += 2;
+            else if (code >= 55296 && code <= 56319 && i + 1 < text.length &&
+                text.charCodeAt(i + 1) >= 56320 && text.charCodeAt(i + 1) <= 57343) {
+                bytes += 4;
+                i++;
+            } else bytes += 3;
+        }
+        return bytes;
+    }
     function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
     function stageIndex(stage) { return STAGES.indexOf(stage); }
     function layerIndex(layer) { return LAYERS.indexOf(layer); }
@@ -340,11 +359,15 @@
 
     function diagnosticRouteMeta(kind, profileOverride, labelOverride) {
         var route = apiRoute(kind || 'compiler');
-        var profile = profileOverride || (route.mode === 'custom' ? activeProfile(kind || 'compiler') : null);
+        var profile = profileOverride || (route.mode === 'custom' ? activeProfile(kind || 'compiler')
+            : (route.mode === 'st_profile' ? activeConnectionProfile(kind || 'compiler') : null));
+        var profileUrl = profile && (profile.url || profile['api-url']) || '';
+        var routeLabel = route.mode === 'custom' ? '独立 API'
+            : (route.mode === 'st_profile' ? '酒馆连接配置 · 真流式' : '酒馆当前连接 · 兼容航道');
         return {
-            route_label: labelOverride || (route.mode === 'custom' ? '独立 API' : '跟随酒馆当前连接'),
-            model: profile && profile.model ? String(profile.model) : (route.mode === 'custom' ? '模型未填写' : '酒馆当前模型'),
-            endpoint: profile && profile.url ? safeEndpoint(normalizeUrl(profile.url)) : ''
+            route_label: labelOverride || routeLabel,
+            model: profile && profile.model ? String(profile.model) : (route.mode === 'current' ? '酒馆当前模型' : '模型未选择'),
+            endpoint: profileUrl ? safeEndpoint(profileUrl) : ''
         };
     }
 
@@ -466,9 +489,13 @@
     function humanizeOperationError(error) {
         var err = error || {};
         var status = parseInt(err.http_status, 10) || 0;
+        if (err.code === 'LUCIOLE_ST_PROFILE_SERVICE') return '当前酒馆没有可用的“连接配置真流式”服务，或连接管理器已被停用。';
+        if (err.code === 'LUCIOLE_ST_PROFILE_MISSING') return '这条航道还没有选择可用的酒馆连接配置。';
+        if (err.code === 'LUCIOLE_ST_STREAM_UNAVAILABLE') return '这份连接配置没有交出真正的流式通道；Luciole 已停止，没有偷偷改走整包请求。';
         if (status === 400 || status === 422) return '请求格式或模型参数不被这条 API 接受。';
         if (status === 401 || status === 403) return '身份验证失败，请检查 API Key 和账号权限。';
         if (status === 404) return '没有找到这个接口或模型，请检查 API 地址和模型名。';
+        if (status === 504 && err.operation_scope === 'compiler' && err.transport === 'st_profile_stream') return '真流式请求在首个数据块到达前仍被网关切断（504）。请检查中转站是否保留 SSE，以及 VPS 反代是否关闭响应缓冲。';
         if (status === 504 && err.operation_scope === 'compiler') return '编译模型还没有写完，上游网关就断开了（504）。这通常是首包过慢或回包过大。';
         if (status === 408 || status === 504) return '上游响应超时，请稍后重试或更换接口。';
         if (status === 429) return '请求过多、额度不足或触发限速，请检查余额与频率。';
@@ -493,14 +520,16 @@
         if (err.http_status) parts.push('HTTP 状态：' + err.http_status);
         if (err.message) parts.push('原始信息：' + err.message);
         if (err.raw_route_error) parts.push('原始航道先前报错：' + err.raw_route_error);
+        if (err.source_error) parts.push('酒馆服务内层报错：' + err.source_error);
         if (err.provider_detail && String(err.provider_detail) !== String(err.message || '')) parts.push('上游说明：' + err.provider_detail);
         if (err.transport) {
-            var transportName = err.transport === 'stream' ? '流式接收'
+            var transportName = err.transport === 'st_profile_stream' ? '酒馆连接配置真流式'
+                : (err.transport === 'stream' ? '独立 API 流式接收'
                 : (err.transport === 'json' ? '整包 JSON'
                     : (/raw_structured/.test(err.transport) ? '酒馆原始结构化调用'
                         : (/raw_prompt/.test(err.transport) ? '酒馆原始短调用'
                             : (/quiet_structured/.test(err.transport) ? '酒馆上下文结构化调用'
-                                : (/quiet_prompt/.test(err.transport) ? '酒馆上下文兼容调用' : err.transport)))));
+                                : (/quiet_prompt/.test(err.transport) ? '酒馆上下文兼容调用' : err.transport))))));
             parts.push('传输方式：' + transportName);
         }
         if (typeof err.response_headers_ms === 'number') parts.push('收到响应头：' + (err.response_headers_ms / 1000).toFixed(1) + ' 秒');
@@ -740,6 +769,72 @@
         return api.profiles[route.activeIndex];
     }
 
+    function connectionManagerService() {
+        var c;
+        try { c = ctx(); } catch (e) { return null; }
+        var disabled = c && c.extensionSettings && c.extensionSettings.disabledExtensions;
+        if (isArray(disabled) && disabled.indexOf('connection-manager') >= 0) return null;
+        var service = c && c.ConnectionManagerRequestService;
+        return service && typeof service.sendRequest === 'function' ? service : null;
+    }
+
+    function rawConnectionProfiles() {
+        var c;
+        try { c = ctx(); } catch (e) { return []; }
+        var manager = c && c.extensionSettings && c.extensionSettings.connectionManager;
+        return manager && isArray(manager.profiles) ? manager.profiles : [];
+    }
+
+    function supportedConnectionProfiles() {
+        var service = connectionManagerService();
+        if (!service) return [];
+        if (typeof service.getSupportedProfiles === 'function') {
+            try {
+                var listed = service.getSupportedProfiles();
+                if (isArray(listed)) return listed.slice();
+            } catch (e) { }
+        }
+        var profiles = rawConnectionProfiles();
+        var out = [];
+        for (var i = 0; i < profiles.length; i++) {
+            var supported = !!(profiles[i] && profiles[i].id && profiles[i].api);
+            if (supported && typeof service.isProfileSupported === 'function') {
+                try { supported = !!service.isProfileSupported(profiles[i]); }
+                catch (e2) { supported = false; }
+            }
+            if (supported) out.push(profiles[i]);
+        }
+        return out;
+    }
+
+    function connectionProfileById(profileId) {
+        var id = String(profileId || '');
+        var profiles = supportedConnectionProfiles();
+        for (var i = 0; i < profiles.length; i++) if (String(profiles[i].id) === id) return profiles[i];
+        return null;
+    }
+
+    function activeConnectionProfile(kind) {
+        var route = apiRoute(kind || 'compiler');
+        return route.mode === 'st_profile' ? connectionProfileById(route.stProfileId) : null;
+    }
+
+    function connectionManagerCapability() {
+        var service = connectionManagerService();
+        var profiles = service ? supportedConnectionProfiles() : [];
+        var forwardsSecret = false;
+        if (service) {
+            try { forwardsSecret = /secret_id/.test(Function.prototype.toString.call(service.sendRequest)); }
+            catch (e) { forwardsSecret = false; }
+        }
+        return {
+            available: !!service,
+            profile_count: profiles.length,
+            profiles: profiles,
+            forwards_profile_secret: forwardsSecret
+        };
+    }
+
     function dataEnvelope(systemPrompt, payload) {
         if (payload === undefined || payload === null) return String(systemPrompt || '');
         return String(systemPrompt || '') + '\n\nBEGIN_DATA_JSON\n' + safeJson(payload) + '\nEND_DATA_JSON\n' +
@@ -904,6 +999,29 @@
         return err;
     }
 
+    function connectionManagerRequestError(error) {
+        var root = error;
+        var err = error instanceof Error ? error : new Error(providerErrorMessage(error) || String(error || '酒馆连接配置请求失败'));
+        var messages = [];
+        var status = 0;
+        var cursor = root;
+        for (var i = 0; cursor && i < 5; i++) {
+            var message = providerErrorMessage(cursor) || (cursor.message ? String(cursor.message) : '');
+            if (message && messages.indexOf(message) < 0) messages.push(message);
+            status = status || parseInt(cursor.http_status || cursor.status || cursor.statusCode ||
+                (cursor.response && cursor.response.status), 10) || 0;
+            if (!status && message) {
+                var match = message.match(/(?:status|http)\s*[: ]?\s*(\d{3})/i);
+                if (match) status = parseInt(match[1], 10) || 0;
+            }
+            cursor = cursor.cause || (cursor.error && cursor.error !== cursor ? cursor.error : null);
+        }
+        if (status) err.http_status = status;
+        if (messages.length > 1) err.source_error = sanitizeDiagnosticText(messages.slice(1).join(' → '), 500);
+        if (!err.code) err.code = 'LUCIOLE_ST_PROFILE_REQUEST';
+        return err;
+    }
+
     function readOpenAiStream(response, telemetry, options) {
         if (!response.body || typeof response.body.getReader !== 'function' || typeof TextDecoder !== 'function') {
             var unavailable = new Error('当前浏览器或接口没有提供可读取的流式响应');
@@ -1048,6 +1166,122 @@
         return callProfileApi(activeProfile(kind), systemPrompt, payload, maxTokens, temperature, timeoutMs, options);
     }
 
+    function callConnectionProfileApi(systemPrompt, payload, maxTokens, temperature, kind, timeoutMs, options) {
+        options = options || {};
+        var service = connectionManagerService();
+        if (!service) {
+            var unavailable = new Error('ConnectionManagerRequestService unavailable');
+            unavailable.code = 'LUCIOLE_ST_PROFILE_SERVICE';
+            return Promise.reject(decorateApiError(unavailable, options, { transport: 'st_profile_stream', stream_requested: true }));
+        }
+        var profile = activeConnectionProfile(kind || 'compiler');
+        if (!profile) {
+            var missing = new Error('Connection profile not selected or unsupported');
+            missing.code = 'LUCIOLE_ST_PROFILE_MISSING';
+            return Promise.reject(decorateApiError(missing, options, { transport: 'st_profile_stream', stream_requested: true }));
+        }
+        var telemetry = {
+            stream_requested: true,
+            transport: 'st_profile_stream',
+            started_ms: Date.now(),
+            response_headers_ms: null,
+            first_chunk_ms: null,
+            received_bytes: 0,
+            event_count: 0,
+            saw_done: false
+        };
+        notifyApiTelemetry(options, telemetry);
+        var controller = typeof AbortController === 'function' ? new AbortController() : null;
+        var generator = null;
+        var messages = payload === undefined || payload === null
+            ? [{ role: 'user', content: String(systemPrompt || '') }]
+            : [{ role: 'system', content: String(systemPrompt || '') }, { role: 'user', content: safeJson(payload) }];
+        var request;
+        try {
+            request = service.sendRequest(String(profile.id), messages, maxTokens || 1800, {
+                stream: true,
+                signal: controller ? controller.signal : null,
+                extractData: true,
+                includePreset: true,
+                includeInstruct: true
+            }, { temperature: temperature == null ? 0 : temperature });
+        } catch (invokeError) {
+            return Promise.reject(decorateApiError(connectionManagerRequestError(invokeError), options, telemetry));
+        }
+
+        request = Promise.resolve(request).then(function (streamFactory) {
+            telemetry.response_headers_ms = Date.now() - telemetry.started_ms;
+            notifyApiTelemetry(options, telemetry);
+            if (typeof streamFactory !== 'function') {
+                var notStreaming = new Error('Connection profile returned a non-streaming response');
+                notStreaming.code = 'LUCIOLE_ST_STREAM_UNAVAILABLE';
+                throw notStreaming;
+            }
+            try { generator = streamFactory(); }
+            catch (factoryError) { throw connectionManagerRequestError(factoryError); }
+            if (!generator || typeof generator.next !== 'function') {
+                var invalidStream = new Error('Connection profile stream factory did not return an async generator');
+                invalidStream.code = 'LUCIOLE_ST_STREAM_UNAVAILABLE';
+                throw invalidStream;
+            }
+            var finalText = '';
+            var finalReasoning = '';
+
+            function mergeCumulative(previous, incoming) {
+                var next = String(incoming == null ? '' : incoming);
+                if (!next) return previous;
+                if (!previous || next.indexOf(previous) === 0) return next;
+                if (previous.indexOf(next) === 0) return previous;
+                return previous + next;
+            }
+
+            function pump() {
+                return Promise.resolve(generator.next()).then(function (step) {
+                    if (step && step.done) {
+                        telemetry.saw_done = true;
+                        telemetry.completed_ms = Date.now() - telemetry.started_ms;
+                        telemetry.received_bytes = utf8ByteLength(finalText) + utf8ByteLength(finalReasoning);
+                        notifyApiTelemetry(options, telemetry);
+                        if (!trim(finalText)) {
+                            var empty = new Error('酒馆连接配置流式结束，但没有返回正文内容');
+                            empty.code = 'LUCIOLE_EMPTY_CONTENT';
+                            throw empty;
+                        }
+                        return finalText;
+                    }
+                    telemetry.event_count += 1;
+                    var chunk = step && step.value || {};
+                    finalText = mergeCumulative(finalText, chunk.text);
+                    finalReasoning = mergeCumulative(finalReasoning, chunk.state && (chunk.state.reasoning || chunk.state.reasoning_content));
+                    telemetry.received_bytes = utf8ByteLength(finalText) + utf8ByteLength(finalReasoning);
+                    if (telemetry.first_chunk_ms === null) {
+                        telemetry.first_chunk_ms = Date.now() - telemetry.started_ms;
+                        notifyApiTelemetry(options, telemetry);
+                    }
+                    if (telemetry.received_bytes > MAX_STREAM_BYTES) {
+                        var tooLarge = new Error('酒馆连接配置流式回包超过 2MB 安全上限');
+                        tooLarge.code = 'LUCIOLE_STREAM_TOO_LARGE';
+                        throw tooLarge;
+                    }
+                    return pump();
+                });
+            }
+            return pump();
+        });
+
+        function stopStream() {
+            if (controller) try { controller.abort(); } catch (e) { }
+            if (generator && typeof generator.return === 'function') {
+                try { Promise.resolve(generator.return()).catch(function () { }); } catch (e2) { }
+            }
+        }
+
+        return withTimeout(request, timeoutMs, stopStream, options.scope).catch(function (error) {
+            var normalized = error && /^LUCIOLE_/.test(String(error.code || '')) ? error : connectionManagerRequestError(error);
+            throw decorateApiError(normalized, options, telemetry);
+        });
+    }
+
     function callCurrentApi(systemPrompt, payload, timeoutMs, options) {
         options = options || {};
         var c = ctx();
@@ -1112,16 +1346,16 @@
 
     function callModel(systemPrompt, payload, maxTokens, temperature, kind, timeoutMs, options) {
         var route = apiRoute(kind || 'compiler');
-        return route.mode === 'custom'
-            ? callCustomApi(systemPrompt, payload, maxTokens, temperature, kind || 'compiler', timeoutMs, options)
-            : callCurrentApi(systemPrompt, payload, timeoutMs, options);
+        if (route.mode === 'custom') return callCustomApi(systemPrompt, payload, maxTokens, temperature, kind || 'compiler', timeoutMs, options);
+        if (route.mode === 'st_profile') return callConnectionProfileApi(systemPrompt, payload, maxTokens, temperature, kind || 'compiler', timeoutMs, options);
+        return callCurrentApi(systemPrompt, payload, timeoutMs, options);
     }
 
     function callCompileModel(systemPrompt, payload, maxTokens, temperature, telemetrySink, jsonSchema, schemaName) {
         return callModel(systemPrompt, payload, Math.max(8000, maxTokens || 8000), temperature, 'compiler', COMPILE_TIMEOUT_MS, {
             scope: 'compiler',
-            stream: apiRoute('compiler').mode === 'custom',
-            raw: apiRoute('compiler').mode !== 'custom',
+            stream: apiRoute('compiler').mode === 'custom' || apiRoute('compiler').mode === 'st_profile',
+            raw: apiRoute('compiler').mode === 'current',
             onTelemetry: telemetrySink
         });
     }
@@ -1932,10 +2166,11 @@
         var lines = [];
         for (var i = 0; i < (reports || []).length; i++) {
             var row = reports[i];
-            var transport = row.transport === 'stream' ? '流式'
+            var transport = row.transport === 'st_profile_stream' ? '酒馆连接配置真流式'
+                : (row.transport === 'stream' ? '独立 API 流式'
                 : (row.transport === 'raw_prompt' ? '酒馆原始短调用（无原生 Schema）'
                     : (row.transport === 'quiet_prompt_fallback' ? '酒馆兼容短调用（原始航道被拒后自动切换）'
-                        : (row.transport === 'quiet_prompt' ? '酒馆兼容短调用（无原生 Schema）' : '整包 JSON')));
+                        : (row.transport === 'quiet_prompt' ? '酒馆兼容短调用（无原生 Schema）' : '整包 JSON'))));
             var bits = [row.label + '：' + transport];
             if (typeof row.response_headers_ms === 'number') bits.push('响应头 ' + (row.response_headers_ms / 1000).toFixed(1) + ' 秒');
             if (typeof row.first_chunk_ms === 'number') bits.push('首块 ' + (row.first_chunk_ms / 1000).toFixed(1) + ' 秒');
@@ -4558,8 +4793,10 @@
         '   <label class="xyh-depth-control"><span>注入深度</span><input type="number" id="xyh_depth" min="0" max="20" class="xyh-num"></label></div>' +
         '  <div class="xyh-row xyh-card xyh-api" id="xyh_api_box">' +
         '   <div class="xyh-section-head"><span class="xyh-section-title">God 双航道</span><small>前期可用强模型，运行可换轻量模型</small></div>' +
-        '   <b class="xyh-mini-title">编译模型</b><div class="xyh-toggles xyh-api-modes"><label><input type="radio" name="xyh_compiler_api_mode" value="current"> 跟随酒馆</label>' +
+        '   <b class="xyh-mini-title">编译模型</b><div class="xyh-toggles xyh-api-modes"><label><input type="radio" name="xyh_compiler_api_mode" value="st_profile"> 连接配置 · 真流式</label>' +
+        '   <label><input type="radio" name="xyh_compiler_api_mode" value="current"> 当前连接 · 兼容</label>' +
         '   <label><input type="radio" name="xyh_compiler_api_mode" value="custom"> 独立 API</label></div>' +
+        '   <label id="xyh_st_compiler_wrap" class="xyh-stack-label" style="display:none;"><span>编译连接配置</span><select id="xyh_st_compiler_profile" class="xyh-select"></select></label>' +
         '   <div id="xyh_api_custom" style="display:none;">' +
         '    <div class="xyh-inline xyh-profile-row"><select id="xyh_api_select" class="xyh-select"></select><span class="xyh-btn xyh-danger" id="xyh_api_del">删除方案</span></div>' +
         '    <input type="text" id="xyh_api_name" placeholder="方案名（如：God / Gemini）">' +
@@ -4571,9 +4808,12 @@
         '   </div>' +
         '   <b class="xyh-mini-title">运行模型</b><div class="xyh-toggles xyh-runtime-api-modes">' +
         '    <label><input type="radio" name="xyh_runtime_api_mode" value="follow_compiler"> 跟随编译模型</label>' +
-        '    <label><input type="radio" name="xyh_runtime_api_mode" value="current"> 跟随酒馆</label>' +
+        '    <label><input type="radio" name="xyh_runtime_api_mode" value="st_profile"> 连接配置</label>' +
+        '    <label><input type="radio" name="xyh_runtime_api_mode" value="current"> 当前连接</label>' +
         '    <label><input type="radio" name="xyh_runtime_api_mode" value="custom"> 独立轻量 API</label></div>' +
+        '   <label id="xyh_st_runtime_wrap" class="xyh-stack-label" style="display:none;"><span>运行连接配置</span><select id="xyh_st_runtime_profile" class="xyh-select"></select></label>' +
         '   <select id="xyh_runtime_api_select" class="xyh-select" style="display:none;"></select>' +
+        '   <div id="xyh_st_profile_status" class="xyh-route-note" style="display:none;"></div>' +
         '  </div>' +
         '  <div class="xyh-row xyh-card xyh-diagnostics" id="xyh_diagnostics">' +
         '   <div class="xyh-section-head"><span class="xyh-section-title">连接与报错台</span><small>测试、编译与运行结果不会自动消失</small></div>' +
@@ -5187,11 +5427,48 @@
 
     /* ---------------- API 与面板绑定 ---------------- */
 
+    function renderConnectionProfileSelect(select, selectedId) {
+        select.empty();
+        var profiles = supportedConnectionProfiles();
+        select.append('<option value="">— 请选择酒馆连接配置 —</option>');
+        for (var i = 0; i < profiles.length; i++) {
+            var profile = profiles[i];
+            var label = trim(profile.name) || ('连接配置 ' + (i + 1));
+            if (trim(profile.model)) label += ' · ' + trim(profile.model);
+            select.append($('<option></option>').attr('value', String(profile.id)).text(label));
+        }
+        select.val(String(selectedId || ''));
+    }
+
+    function renderConnectionProfileStatus(api) {
+        var box = $('#xyh_st_profile_status');
+        var visible = api.compiler.mode === 'st_profile' || api.runtime.mode === 'st_profile';
+        box.toggle(visible);
+        if (!visible) { box.empty(); return; }
+        var capability = connectionManagerCapability();
+        var html;
+        if (!capability.available) {
+            html = '<b>这版酒馆暂时不能走连接配置真流式。</b><br>连接管理器可能已停用，或酒馆没有公开该服务；可改用“当前连接 · 兼容”或“独立 API”。';
+        } else if (!capability.profile_count) {
+            html = '<b>真流式服务可用，但还没有可用连接配置。</b><br>先到酒馆“连接管理器”保存一个 Chat Completion 或 Text Completion 配置。';
+        } else {
+            html = '<b>已发现 ' + capability.profile_count + ' 个可用连接配置。</b><br>Luciole 不读取密钥，只请酒馆代发并逐块接收。';
+            if (capability.forwards_profile_secret) html += '<br>这版酒馆支持按配置携带已保存的密钥标识。';
+            else html += '<br><span class="xyh-route-warn">旧版酒馆可能沿用该提供商当前选中的密钥；正式编译前请先测试航道。</span>';
+        }
+        html += '<div><span class="xyh-btn" id="xyh_st_profiles_refresh">重新读取连接配置</span></div>';
+        box.html(html);
+    }
+
     function renderApiUI() {
         var api = settings().api;
         $('input[name="xyh_compiler_api_mode"][value="' + api.compiler.mode + '"]').prop('checked', true);
         $('input[name="xyh_runtime_api_mode"][value="' + api.runtime.mode + '"]').prop('checked', true);
         $('#xyh_api_custom').toggle(api.compiler.mode === 'custom');
+        $('#xyh_st_compiler_wrap').toggle(api.compiler.mode === 'st_profile');
+        $('#xyh_st_runtime_wrap').toggle(api.runtime.mode === 'st_profile');
+        renderConnectionProfileSelect($('#xyh_st_compiler_profile'), api.compiler.stProfileId);
+        renderConnectionProfileSelect($('#xyh_st_runtime_profile'), api.runtime.stProfileId);
         var sel = $('#xyh_api_select');
         sel.empty();
         if (!api.profiles.length) sel.append('<option value="-1">（还没有方案）</option>');
@@ -5202,6 +5479,7 @@
         if (!api.profiles.length) runtimeSel.append('<option value="-1">（还没有方案）</option>');
         else for (var r = 0; r < api.profiles.length; r++) runtimeSel.append('<option value="' + r + '"' + (r === api.runtime.activeIndex ? ' selected' : '') + '>' + esc(api.profiles[r].name || ('方案' + (r + 1))) + '</option>');
         runtimeSel.toggle(api.runtime.mode === 'custom');
+        renderConnectionProfileStatus(api);
         fillApiFields();
     }
 
@@ -5224,14 +5502,15 @@
         var testTelemetry = null;
         var testOptions = {
             scope: kind === 'compiler' ? 'compiler' : 'runtime',
-            stream: kind === 'compiler' && (!!profileOverride || route.mode === 'custom'),
-            raw: kind === 'compiler' && !profileOverride && route.mode !== 'custom',
+            stream: route.mode === 'st_profile' || (kind === 'compiler' && (!!profileOverride || route.mode === 'custom')),
+            raw: kind === 'compiler' && !profileOverride && route.mode === 'current',
             onTelemetry: function (row) { testTelemetry = normalizeCompileTelemetry(row); }
         };
         if (button && button.length) button.prop('disabled', true).text('连接中……');
+        var testTimeout = kind === 'compiler' ? COMPILE_ROUTE_TEST_TIMEOUT_MS : RUNTIME_TIMEOUT_MS;
         var promise = profileOverride ?
-            callProfileApi(profileOverride, '你是 Luciole 的连接测试。只回复“通”。', null, 8, 0, RUNTIME_TIMEOUT_MS, testOptions) :
-            callModel('你是 Luciole 的连接测试。只回复“通”。', null, 8, 0, kind, RUNTIME_TIMEOUT_MS, testOptions);
+            callProfileApi(profileOverride, '你是 Luciole 的连接测试。只回复“通”。', null, 256, 0, testTimeout, testOptions) :
+            callModel('你是 Luciole 的连接测试。只回复“通”。', null, 256, 0, kind, testTimeout, testOptions);
         return promise.then(function (text) {
             var reply = trim(text).replace(/\s+/g, ' ').slice(0, 80);
             var detail = reply ? ('测试回复：' + reply) : '';
@@ -5255,13 +5534,23 @@
     function bindApiUI() {
         $('input[name="xyh_compiler_api_mode"]').on('change', function () {
             settings().api.compiler.mode = $(this).val();
-            $('#xyh_api_custom').toggle(settings().api.compiler.mode === 'custom');
-            save();
+            save(); renderApiUI();
         });
         $('input[name="xyh_runtime_api_mode"]').on('change', function () {
             settings().api.runtime.mode = $(this).val();
-            $('#xyh_runtime_api_select').toggle(settings().api.runtime.mode === 'custom');
-            save();
+            save(); renderApiUI();
+        });
+        $('#xyh_st_compiler_profile').on('change', function () {
+            settings().api.compiler.stProfileId = String($(this).val() || '');
+            save(); renderConnectionProfileStatus(settings().api);
+        });
+        $('#xyh_st_runtime_profile').on('change', function () {
+            settings().api.runtime.stProfileId = String($(this).val() || '');
+            save(); renderConnectionProfileStatus(settings().api);
+        });
+        $('#xyh_st_profile_status').on('click', '#xyh_st_profiles_refresh', function () {
+            renderApiUI();
+            toast('已经重新读取酒馆连接配置');
         });
         $('#xyh_api_select').on('change', function () {
             settings().api.compiler.activeIndex = parseInt($(this).val(), 10);
@@ -5533,7 +5822,7 @@
     }
 
     function init() {
-        console.log('[Luciole] v1.6.5 init 开始');
+        console.log('[Luciole] v1.6.6 init 开始');
         var c;
         try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
         try {
@@ -5555,7 +5844,7 @@
         if (t.MESSAGE_EDITED) ev.on(t.MESSAGE_EDITED, onStoryRewrite);
         if (t.MESSAGE_UPDATED) ev.on(t.MESSAGE_UPDATED, onStoryRewrite);
         if (t.CHAT_DELETED) ev.on(t.CHAT_DELETED, onStoryRewrite);
-        console.log('[Luciole] v1.6.5 三轨点灯');
+        console.log('[Luciole] v1.6.6 三轨点灯 · 连接配置真流式');
     }
 
     if (typeof window !== 'undefined' && window.__LUCIOLE_TEST__) {
@@ -5601,6 +5890,10 @@
             openAiStreamEvent: openAiStreamEvent,
             callProfileApi: callProfileApi,
             callCurrentApi: callCurrentApi,
+            callConnectionProfileApi: callConnectionProfileApi,
+            connectionManagerCapability: connectionManagerCapability,
+            supportedConnectionProfiles: supportedConnectionProfiles,
+            activeConnectionProfile: activeConnectionProfile,
             setCurrentRawGenerationSupportForTests: function (value) {
                 currentRawGenerationSupport = value === true ? true : (value === false ? false : null);
             },

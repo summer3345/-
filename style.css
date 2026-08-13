@@ -1030,7 +1030,7 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
 
 .xyh-runtime-api-modes {
     display: grid !important;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px !important;
 }
 
@@ -1052,6 +1052,21 @@ body.reduced-motion #extensionHarborDock #xyh_floater[data-harbor-parked="1"] .x
     border-color: var(--xyh-line-strong);
     background: var(--xyh-hover);
 }
+
+.xyh-route-note {
+    margin-top: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--xyh-line);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--xyh-green) 8%, transparent);
+    color: var(--xyh-muted);
+    font-size: .82em;
+    line-height: 1.5;
+}
+
+.xyh-route-note b { color: var(--xyh-text); }
+.xyh-route-note .xyh-btn { display: inline-flex; margin-top: 7px; }
+.xyh-route-warn { color: var(--xyh-accent-strong); }
 
 .xyh-schedule-grid {
     display: grid;
