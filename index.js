@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.16 — 上帝视角剧本引擎 · 宽口安检
+ * Luciole v1.6.17 — 上帝视角剧本引擎 · 干净编译航道
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -686,6 +686,11 @@
         if (err.code === 'LUCIOLE_TIMEOUT') return '请求超过 20 秒没有返回；正式运行时本轮会安全放行。';
         if (err.code === 'LUCIOLE_STAGE_SHAPE') return '这一小步已经收到回包，但字段没有交齐；已完成的前序步骤仍然保留，可以只重试本步。';
         var message = sanitizeDiagnosticText(err.message || String(error || ''), 500);
+        if (/failed to fetch|networkerror|load failed|network request failed/i.test(message) && err.transport === 'st_profile_stream') {
+            if ((err.received_bytes || 0) > 0) return '真流式已经收到有效文字，但连接在完成前中断；草稿检查点仍然保留。';
+            if ((err.event_count || 0) > 0) return '真流式已经建立并收到空事件，但第一段有效文字到达前连接中断；这不是地址或密钥未连接。';
+            if (typeof err.response_headers_ms === 'number') return '真流式已经收到响应头，但第一段有效文字到达前连接中断；这不是地址或密钥未连接。';
+        }
         if (/failed to fetch|networkerror|load failed|network request failed/i.test(message)) return '网络请求没有建立成功，请检查地址、网络或中转站状态。';
         if (/service unavailable/i.test(message)) return '酒馆当前上游暂时不可用；插件已尝试兼容航道，仍未建立请求。请稍后重试。';
         if (/bad request/i.test(message)) return '酒馆当前连接拒绝了这类后台生成请求；请展开技术详情确认兼容航道。';
@@ -715,10 +720,17 @@
             parts.push('传输方式：' + transportName);
         }
         if (typeof err.response_headers_ms === 'number') parts.push('收到响应头：' + (err.response_headers_ms / 1000).toFixed(1) + ' 秒');
-        if (typeof err.first_chunk_ms === 'number') parts.push('收到首个数据块：' + (err.first_chunk_ms / 1000).toFixed(1) + ' 秒');
+        if (typeof err.first_event_ms === 'number') parts.push('收到首个流事件：' + (err.first_event_ms / 1000).toFixed(1) + ' 秒');
+        if (typeof err.first_chunk_ms === 'number') parts.push('收到首段有效文字：' + (err.first_chunk_ms / 1000).toFixed(1) + ' 秒');
+        if (typeof err.last_event_ms === 'number') parts.push('最后流事件：' + (err.last_event_ms / 1000).toFixed(1) + ' 秒');
+        if (typeof err.last_nonempty_ms === 'number') parts.push('最后有效文字：' + (err.last_nonempty_ms / 1000).toFixed(1) + ' 秒');
+        if (typeof err.event_count === 'number') parts.push('流事件：' + err.event_count + ' 个（有效 ' + (err.nonempty_event_count || 0) + ' / 空事件 ' + (err.empty_event_count || 0) + '）');
         if (typeof err.reasoning_bytes === 'number') parts.push('思考内容：' + err.reasoning_bytes + ' 字节');
         if (typeof err.content_bytes === 'number') parts.push('正文内容：' + err.content_bytes + ' 字节');
         if (typeof err.received_bytes === 'number') parts.push('中断前已接收：' + err.received_bytes + ' 字节');
+        if (typeof err.request_bytes === 'number') parts.push('请求文本体积：' + err.request_bytes + ' 字节');
+        if (typeof err.requested_max_tokens === 'number') parts.push('请求输出上限：' + err.requested_max_tokens + ' tokens');
+        if (typeof err.profile_preset_inherited === 'boolean') parts.push('聊天预设继承：' + (err.profile_preset_inherited ? '是' : '否（编译隔离）'));
         return sanitizeDiagnosticText(parts.join('\n') || String(error || '未知错误'), 1200);
     }
 
@@ -1614,10 +1626,20 @@
         if (telemetry) {
             err.transport = telemetry.transport || (telemetry.stream_requested ? 'stream' : 'json');
             if (typeof telemetry.response_headers_ms === 'number') err.response_headers_ms = telemetry.response_headers_ms;
+            if (typeof telemetry.first_event_ms === 'number') err.first_event_ms = telemetry.first_event_ms;
             if (typeof telemetry.first_chunk_ms === 'number') err.first_chunk_ms = telemetry.first_chunk_ms;
+            if (typeof telemetry.last_event_ms === 'number') err.last_event_ms = telemetry.last_event_ms;
+            if (typeof telemetry.last_nonempty_ms === 'number') err.last_nonempty_ms = telemetry.last_nonempty_ms;
             if (typeof telemetry.received_bytes === 'number') err.received_bytes = telemetry.received_bytes;
             if (typeof telemetry.reasoning_bytes === 'number') err.reasoning_bytes = telemetry.reasoning_bytes;
             if (typeof telemetry.content_bytes === 'number') err.content_bytes = telemetry.content_bytes;
+            if (typeof telemetry.event_count === 'number') err.event_count = telemetry.event_count;
+            if (typeof telemetry.nonempty_event_count === 'number') err.nonempty_event_count = telemetry.nonempty_event_count;
+            if (typeof telemetry.empty_event_count === 'number') err.empty_event_count = telemetry.empty_event_count;
+            if (typeof telemetry.request_bytes === 'number') err.request_bytes = telemetry.request_bytes;
+            if (typeof telemetry.requested_max_tokens === 'number') err.requested_max_tokens = telemetry.requested_max_tokens;
+            if (typeof telemetry.failed_ms === 'number') err.failed_ms = telemetry.failed_ms;
+            if (typeof telemetry.profile_preset_inherited === 'boolean') err.profile_preset_inherited = telemetry.profile_preset_inherited;
         }
         return err;
     }
@@ -1841,32 +1863,41 @@
             missing.code = 'LUCIOLE_ST_PROFILE_MISSING';
             return Promise.reject(decorateApiError(missing, options, { transport: 'st_profile_stream', stream_requested: true }));
         }
+        var isolatedCompiler = options.scope === 'compiler' || kind === 'compiler' || kind === 'clue_compiler';
+        var messages = payload === undefined || payload === null
+            ? [{ role: 'user', content: String(systemPrompt || '') }]
+            : [{ role: 'system', content: String(systemPrompt || '') }, { role: 'user', content: safeJson(payload) }];
         var telemetry = {
             stream_requested: true,
             transport: 'st_profile_stream',
             started_ms: Date.now(),
             response_headers_ms: null,
+            first_event_ms: null,
             first_chunk_ms: null,
+            last_event_ms: null,
+            last_nonempty_ms: null,
             received_bytes: 0,
             reasoning_bytes: 0,
             content_bytes: 0,
             event_count: 0,
+            nonempty_event_count: 0,
+            empty_event_count: 0,
+            request_bytes: utf8ByteLength(safeJson(messages)),
+            requested_max_tokens: maxTokens || 1800,
+            profile_preset_inherited: !isolatedCompiler,
             saw_done: false
         };
         notifyApiTelemetry(options, telemetry);
         var controller = typeof AbortController === 'function' ? new AbortController() : null;
         var generator = null;
-        var messages = payload === undefined || payload === null
-            ? [{ role: 'user', content: String(systemPrompt || '') }]
-            : [{ role: 'system', content: String(systemPrompt || '') }, { role: 'user', content: safeJson(payload) }];
         var request;
         try {
             request = service.sendRequest(String(profile.id), messages, maxTokens || 1800, {
                 stream: true,
                 signal: controller ? controller.signal : null,
                 extractData: true,
-                includePreset: true,
-                includeInstruct: true
+                includePreset: !isolatedCompiler,
+                includeInstruct: !isolatedCompiler
             }, { temperature: temperature == null ? 0 : temperature });
         } catch (invokeError) {
             return Promise.reject(decorateApiError(connectionManagerRequestError(invokeError), options, telemetry));
@@ -1923,15 +1954,23 @@
                     }
                     telemetry.event_count += 1;
                     var chunk = step && step.value || {};
+                    var eventElapsed = Date.now() - telemetry.started_ms;
+                    if (telemetry.first_event_ms === null) telemetry.first_event_ms = eventElapsed;
+                    telemetry.last_event_ms = eventElapsed;
+                    var previousBytes = telemetry.received_bytes;
                     finalText = mergeCumulative(finalText, chunk.text);
                     finalReasoning = mergeCumulative(finalReasoning, chunk.state && (chunk.state.reasoning || chunk.state.reasoning_content));
                     telemetry.content_bytes = utf8ByteLength(finalText);
                     telemetry.reasoning_bytes = utf8ByteLength(finalReasoning);
                     telemetry.received_bytes = telemetry.content_bytes + telemetry.reasoning_bytes;
-                    if (telemetry.first_chunk_ms === null) {
-                        telemetry.first_chunk_ms = Date.now() - telemetry.started_ms;
-                        notifyApiTelemetry(options, telemetry);
+                    if (telemetry.received_bytes > previousBytes) {
+                        telemetry.nonempty_event_count += 1;
+                        telemetry.last_nonempty_ms = eventElapsed;
+                        if (telemetry.first_chunk_ms === null) telemetry.first_chunk_ms = eventElapsed;
+                    } else {
+                        telemetry.empty_event_count += 1;
                     }
+                    notifyApiTelemetry(options, telemetry);
                     if (telemetry.received_bytes > MAX_STREAM_BYTES) {
                         var tooLarge = new Error('酒馆连接配置流式回包超过 2MB 安全上限');
                         tooLarge.code = 'LUCIOLE_STREAM_TOO_LARGE';
@@ -1951,6 +1990,8 @@
         }
 
         return withTimeout(request, timeoutMs, stopStream, options.scope).catch(function (error) {
+            telemetry.failed_ms = Date.now() - telemetry.started_ms;
+            notifyApiTelemetry(options, telemetry);
             var normalized = error && /^LUCIOLE_/.test(String(error.code || '')) ? error : connectionManagerRequestError(error);
             throw decorateApiError(normalized, options, telemetry);
         });
@@ -3282,12 +3323,21 @@
             stream_requested: !!row.stream_requested,
             transport: sanitizeDiagnosticText(row.transport || '', 30),
             response_headers_ms: typeof row.response_headers_ms === 'number' ? Math.max(0, Math.round(row.response_headers_ms)) : null,
+            first_event_ms: typeof row.first_event_ms === 'number' ? Math.max(0, Math.round(row.first_event_ms)) : null,
             first_chunk_ms: typeof row.first_chunk_ms === 'number' ? Math.max(0, Math.round(row.first_chunk_ms)) : null,
+            last_event_ms: typeof row.last_event_ms === 'number' ? Math.max(0, Math.round(row.last_event_ms)) : null,
+            last_nonempty_ms: typeof row.last_nonempty_ms === 'number' ? Math.max(0, Math.round(row.last_nonempty_ms)) : null,
             completed_ms: typeof row.completed_ms === 'number' ? Math.max(0, Math.round(row.completed_ms)) : null,
+            failed_ms: typeof row.failed_ms === 'number' ? Math.max(0, Math.round(row.failed_ms)) : null,
             received_bytes: typeof row.received_bytes === 'number' ? Math.max(0, Math.round(row.received_bytes)) : 0,
             reasoning_bytes: typeof row.reasoning_bytes === 'number' ? Math.max(0, Math.round(row.reasoning_bytes)) : null,
             content_bytes: typeof row.content_bytes === 'number' ? Math.max(0, Math.round(row.content_bytes)) : null,
             event_count: typeof row.event_count === 'number' ? Math.max(0, Math.round(row.event_count)) : 0,
+            nonempty_event_count: typeof row.nonempty_event_count === 'number' ? Math.max(0, Math.round(row.nonempty_event_count)) : 0,
+            empty_event_count: typeof row.empty_event_count === 'number' ? Math.max(0, Math.round(row.empty_event_count)) : 0,
+            request_bytes: typeof row.request_bytes === 'number' ? Math.max(0, Math.round(row.request_bytes)) : null,
+            requested_max_tokens: typeof row.requested_max_tokens === 'number' ? Math.max(0, Math.round(row.requested_max_tokens)) : null,
+            profile_preset_inherited: typeof row.profile_preset_inherited === 'boolean' ? row.profile_preset_inherited : null,
             saw_done: !!row.saw_done,
             reasoning_json_recovered: !!row.reasoning_json_recovered,
             schema_fallback: !!row.schema_fallback,
@@ -3389,11 +3439,17 @@
                         : (row.transport === 'quiet_prompt' ? '酒馆兼容短调用（无原生 Schema）' : '整包 JSON'))));
             var bits = [row.label + '：' + transport];
             if (typeof row.response_headers_ms === 'number') bits.push('响应头 ' + (row.response_headers_ms / 1000).toFixed(1) + ' 秒');
-            if (typeof row.first_chunk_ms === 'number') bits.push('首块 ' + (row.first_chunk_ms / 1000).toFixed(1) + ' 秒');
+            if (typeof row.first_event_ms === 'number') bits.push('首事件 ' + (row.first_event_ms / 1000).toFixed(1) + ' 秒');
+            if (typeof row.first_chunk_ms === 'number') bits.push('首段有效文字 ' + (row.first_chunk_ms / 1000).toFixed(1) + ' 秒');
             if (typeof row.completed_ms === 'number') bits.push('完成 ' + (row.completed_ms / 1000).toFixed(1) + ' 秒');
+            else if (typeof row.failed_ms === 'number') bits.push('中断 ' + (row.failed_ms / 1000).toFixed(1) + ' 秒');
+            if (row.event_count) bits.push('事件 ' + row.event_count + '（有效 ' + row.nonempty_event_count + ' / 空 ' + row.empty_event_count + '）');
             if (typeof row.reasoning_bytes === 'number' || typeof row.content_bytes === 'number') {
                 bits.push('思考 ' + (row.reasoning_bytes || 0) + ' / 正文 ' + (row.content_bytes || 0) + ' 字节');
             } else if (row.received_bytes) bits.push(row.received_bytes + ' 字节');
+            if (typeof row.request_bytes === 'number') bits.push('请求 ' + row.request_bytes + ' 字节');
+            if (typeof row.requested_max_tokens === 'number') bits.push('上限 ' + row.requested_max_tokens + ' tokens');
+            if (row.profile_preset_inherited === false) bits.push('编译预设隔离');
             if (row.reasoning_json_recovered) bits.push('已接管误入思考通道的完整 JSON');
             lines.push(bits.join(' · '));
         }
@@ -7654,7 +7710,7 @@
     }
 
     function init() {
-        console.log('[Luciole] v1.6.16 init 开始');
+        console.log('[Luciole] v1.6.17 init 开始');
         var c;
         try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
         try {
@@ -7681,7 +7737,7 @@
         if (t.WORLDINFO_SETTINGS_UPDATED) ev.on(t.WORLDINFO_SETTINGS_UPDATED, onSafetySourceChanged);
         if (t.PERSONA_CHANGED) ev.on(t.PERSONA_CHANGED, onSafetySourceChanged);
         if (t.CHARACTER_EDITED) ev.on(t.CHARACTER_EDITED, onSafetySourceChanged);
-        console.log('[Luciole] v1.6.16 三轨点灯 · 宽口安检');
+        console.log('[Luciole] v1.6.17 三轨点灯 · 干净编译航道');
     }
 
     if (typeof window !== 'undefined' && window.__LUCIOLE_TEST__) {
