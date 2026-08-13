@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.18 — 上帝视角剧本引擎 · 宽口编译器
+ * Luciole v1.6.19 — 上帝视角剧本引擎 · 开幕观察窗
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -785,6 +785,44 @@
             used += line.length + (out.length > 1 ? 1 : 0);
         }
         return out.join('\n');
+    }
+
+    /*
+     * 运行期 God 在玩家新一轮发言后、演员正文生成前工作。
+     * 因此这里给它“最近若干完整回合 + 本轮玩家发言”，而不是机械截取若干条消息。
+     * 所有正文仍按整条取舍；预算不足时舍弃更早的完整回合，不截成可能变义的半句话。
+     */
+    function recentStoryWindow(roundLimit, charLimit) {
+        var chat = ctx().chat || [];
+        var rounds = [];
+        var current = '';
+        var end = chat.length - 1;
+        if (end >= 0 && chat[end] && chat[end].is_user) {
+            current = 'USER（本轮）: ' + String(chat[end].mes || '');
+            end--;
+        }
+        var assistant = null;
+        for (var i = end; i >= 0 && rounds.length < roundLimit; i--) {
+            if (!chat[i]) continue;
+            if (!chat[i].is_user && !assistant) {
+                assistant = 'ASSISTANT: ' + String(chat[i].mes || '');
+                continue;
+            }
+            if (chat[i].is_user && assistant) {
+                rounds.unshift('USER: ' + String(chat[i].mes || '') + '\n' + assistant);
+                assistant = null;
+            }
+        }
+        var selected = [];
+        var used = current ? current.length : 0;
+        for (var r = rounds.length - 1; r >= 0; r--) {
+            var size = rounds[r].length + (used ? 1 : 0);
+            if (size + used > charLimit) continue;
+            selected.unshift(rounds[r]);
+            used += size;
+        }
+        if (current) selected.push(current.length <= charLimit ? current : 'USER（本轮）: （本轮玩家发言超过上下文预算，整条未下发）');
+        return selected.join('\n');
     }
 
     function latestUserText() {
@@ -4998,7 +5036,8 @@
                     activation_completed_count: activationCompleted,
                     story_round: 0,
                     interval: interval,
-                    next_due_round: interval,
+                    /* 点亮后的下一轮先开一次观察窗，此后再按 interval 排程。 */
+                    next_due_round: 1,
                     clue_strength: strength,
                     planned_total_rounds: plannedRounds,
                     planned_drop_count: plannedDrops,
@@ -5057,7 +5096,7 @@
                 activation_completed_count: completedRoundCount(ladder.runtime.lineage),
                 story_round: 0,
                 interval: 10,
-                next_due_round: 10,
+                next_due_round: ladder.meta.schedule_source === 'user_interval' ? 1 : 10,
                 clue_strength: ladder.meta.clue_strength,
                 planned_total_rounds: null,
                 planned_drop_count: null,
@@ -5080,6 +5119,21 @@
         if (typeof schedule.story_round !== 'number') schedule.story_round = 0;
         schedule.interval = clamp(parseInt(schedule.interval, 10) || 10, 1, 9999);
         if (typeof schedule.next_due_round !== 'number') schedule.next_due_round = schedule.interval;
+        /*
+         * v1.6.18 及更早的新式排程把第一个窗口放在 interval，造成点亮后的开幕空窗。
+         * 只迁移尚未发生任何运行调用的故事线；已经开演的线绝不静默改节奏。
+         */
+        if (!schedule.opening_window_version) {
+            var openingCalls = schedule.calls || {};
+            var openingCallCount = (openingCalls.planned || 0) + (openingCalls.event || 0) + (openingCalls.manual || 0);
+            var openingFailedCount = (openingCalls.timeout || 0) + (openingCalls.rejected || 0);
+            var noSuccessfulOpening = openingCallCount === 0 || openingFailedCount >= openingCallCount;
+            if (ladder.meta.schedule_source === 'user_interval' && noSuccessfulOpening &&
+                (schedule.seed_cursor || 0) === 0 && !Object.keys(ladder.runtime.disclosures || {}).length) {
+                schedule.next_due_round = Math.max(1, schedule.story_round + 1);
+            }
+            schedule.opening_window_version = 1;
+        }
         if (STRENGTHS.indexOf(schedule.clue_strength) < 0) schedule.clue_strength = ladder.meta.clue_strength;
         if (typeof schedule.seed_cursor !== 'number') schedule.seed_cursor = 0;
         if (typeof schedule.exhausted !== 'boolean') schedule.exhausted = false;
@@ -5618,7 +5672,7 @@
             allowed_anchor_scopes: ['initial_only', 'initial_plus_disclosed'],
             public_ledger_digest: publicLedgerDigest(ladder),
             summary: boundedWholeText(summaryText(), 1200, '摘要'),
-            recent_rounds: recentMessages(3, 3300)
+            recent_rounds: recentStoryWindow(3, 12000)
         };
     }
 
@@ -5691,7 +5745,14 @@
             if (verdictIds[verdict.cond_id]) errors.push('condition_verdict 重复');
             verdictIds[verdict.cond_id] = true;
             var condition = ladder.runtime.conditions[verdict.cond_id];
-            if (condition && condition.sticky && verdict.state === 'unmet') errors.push('sticky condition 不可判为 unmet');
+            if (condition && condition.sticky && verdict.state === 'unmet') {
+                var stickyAlreadyMet = condition.state === 'met';
+                for (var sc = 0; sc < (gc.local_changes || []).length; sc++) {
+                    if (gc.local_changes[sc].cond_id === verdict.cond_id && gc.local_changes[sc].state === 'met') stickyAlreadyMet = true;
+                }
+                /* 未达成的 sticky 可以继续是 unmet；一旦达成，只本地保持 met，不让模型倒写历史。 */
+                if (stickyAlreadyMet) verdict.state = 'met';
+            }
         }
         var moveLayers = {};
         for (var sm = 0; sm < moves.length; sm++) {
@@ -5859,7 +5920,7 @@
             environment_palette: clone(ladder.safe_store.environment_palette || emptyEnvironmentPalette()),
             world_note: boundedWholeText((store() && store().worldNote) || '', 1200, '世界观'),
             summary: boundedWholeText(summaryText(), 1200, '摘要'),
-            recent_rounds: recentMessages(3, 3300),
+            recent_rounds: recentStoryWindow(3, 12000),
             evidence_type_whitelist: clone(ladder.safe_store.evidence_type_whitelist),
             nature_by_stage: { dormant: ['observation', 'rumor'], trace: ['observation', 'rumor'], suspect: ['observation', 'rumor'], verifiable: ['fact', 'statement', 'observation', 'rumor'], critical: ['fact', 'statement', 'observation', 'rumor'], revealed: ['fact', 'statement', 'observation', 'rumor'] },
             allowed_release_policies: RELEASE_POLICIES.slice(1),
@@ -7344,10 +7405,10 @@
                 : '只在开局拆分一次；之后按固定顺序本地投放，运行期不再调用 God。');
         $('#xyh_mode_help').text(help);
         var preview = mode === 'god_supervised'
-            ? '每 ' + interval + ' 轮监督一次；没有预设终点。'
+            ? '点亮后的下一轮先监督一次；此后每 ' + interval + ' 轮监督一次，没有预设终点。'
             : (mode === 'smart_dispatch'
-                ? '预计 ' + estimate.planned + ' 个调度窗口；编译 ' + estimate.target + ' 条候选。需要备用时可在启用后点“补充候选”。'
-                : '将拆分 ' + estimate.target + ' 条线索；每 ' + interval + ' 轮按顺序投放一条' + (estimate.batches > 1 ? '；编译需 ' + estimate.batches + ' 批' : '') + '。');
+                ? '下一轮先调度一次，此后每 ' + interval + ' 轮一次；预计 ' + estimate.planned + ' 个窗口，编译 ' + estimate.target + ' 条候选。'
+                : '将拆分 ' + estimate.target + ' 条线索；下一轮先投一条，此后每 ' + interval + ' 轮按顺序投放' + (estimate.batches > 1 ? '；编译需 ' + estimate.batches + ' 批' : '') + '。');
         $('#xyh_schedule_preview').text(preview);
     }
 
@@ -8323,6 +8384,7 @@
             userMessageCount: userMessageCount,
             completedRoundCount: completedRoundCount,
             storyRoundNow: storyRoundNow,
+            recentStoryWindow: recentStoryWindow,
             refreshStoryClock: refreshStoryClock,
             intervalDue: intervalDue,
             notePlayerAttention: notePlayerAttention,
