@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.9 — 上帝视角剧本引擎 · 编译法条同步
+ * Luciole v1.6.10 — 上帝视角剧本引擎 · 候选批稳定续跑
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -31,7 +31,7 @@
     var COMPILE_TIMEOUT_MS = 500000;
     var COMPILE_ROUTE_TEST_TIMEOUT_MS = 120000;
     var MAX_STREAM_BYTES = 2097152;
-    var SMART_STAGE_BATCH_SIZE = 10;
+    var SMART_STAGE_BATCH_SIZE = 5;
     var SMART_STAGE_CELL_LIMIT = 12;
     var UNIFORM_STAGE_BATCH_SIZE = 25;
     var currentRawGenerationSupport = null;
@@ -1380,6 +1380,13 @@
         return String((msg && msg.content) || '');
     }
 
+    function assistantReasoningFromResponse(data) {
+        var choice = data && data.choices && data.choices[0];
+        var msg = choice && choice.message;
+        if (!msg) return '';
+        return completionContentText(msg.reasoning_content || msg.reasoning);
+    }
+
     function completionContentText(content) {
         if (isArray(content)) {
             var pieces = [];
@@ -1390,6 +1397,50 @@
             return pieces.join('');
         }
         return typeof content === 'string' ? content : '';
+    }
+
+    function recoverCompleteJsonObject(text) {
+        var source = trim(text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+        if (!source) return '';
+        try {
+            var whole = JSON.parse(source);
+            if (isObject(whole)) return safeJson(whole);
+        } catch (wholeError) { }
+        var searchFrom = 0;
+        while (searchFrom < source.length) {
+            var start = source.indexOf('{', searchFrom);
+            if (start < 0) break;
+            var depth = 0;
+            var inString = false;
+            var escaped = false;
+            var closedAt = -1;
+            for (var i = start; i < source.length; i++) {
+                var ch = source.charAt(i);
+                if (inString) {
+                    if (escaped) escaped = false;
+                    else if (ch === '\\') escaped = true;
+                    else if (ch === '"') inString = false;
+                    continue;
+                }
+                if (ch === '"') { inString = true; continue; }
+                if (ch === '{') depth++;
+                else if (ch === '}') {
+                    depth--;
+                    if (depth === 0) {
+                        closedAt = i;
+                        var candidate = source.slice(start, i + 1);
+                        try {
+                            var parsed = JSON.parse(candidate);
+                            if (isObject(parsed)) return safeJson(parsed);
+                        } catch (candidateError) { }
+                        break;
+                    }
+                }
+            }
+            if (closedAt < 0) return '';
+            searchFrom = closedAt + 1;
+        }
+        return '';
     }
 
     function openAiStreamEvent(data) {
@@ -1525,6 +1576,13 @@
                     telemetry.reasoning_bytes = utf8ByteLength(reasoning);
                     notifyApiTelemetry(options, telemetry);
                     if (!trim(output)) {
+                        var recovered = options && options.allowReasoningJson ? recoverCompleteJsonObject(reasoning) : '';
+                        if (recovered) {
+                            telemetry.reasoning_json_recovered = true;
+                            telemetry.content_bytes = utf8ByteLength(recovered);
+                            notifyApiTelemetry(options, telemetry);
+                            return recovered;
+                        }
                         var empty = new Error(reasoning ? '流式接口只返回了思考过程，没有返回正文内容' : '流式接口结束，但没有返回正文内容');
                         empty.code = reasoning ? 'LUCIOLE_REASONING_ONLY' : 'LUCIOLE_EMPTY_CONTENT';
                         throw empty;
@@ -1599,8 +1657,29 @@
             return parseApiJsonResponse(res);
         }).then(function (data) {
             if (typeof data === 'string') return data;
-            var content = assistantTextFromResponse(data);
+            var content = '';
+            try { content = assistantTextFromResponse(data); }
+            catch (contentError) {
+                var recoveredAfterLimit = options.allowReasoningJson ? recoverCompleteJsonObject(assistantReasoningFromResponse(data)) : '';
+                if (!recoveredAfterLimit) throw contentError;
+                telemetry.reasoning_json_recovered = true;
+                telemetry.reasoning_bytes = utf8ByteLength(assistantReasoningFromResponse(data));
+                telemetry.content_bytes = utf8ByteLength(recoveredAfterLimit);
+                telemetry.received_bytes = Math.max(telemetry.received_bytes, telemetry.reasoning_bytes);
+                notifyApiTelemetry(options, telemetry);
+                return recoveredAfterLimit;
+            }
             if (!trim(content)) {
+                var reasoning = assistantReasoningFromResponse(data);
+                var recovered = options.allowReasoningJson ? recoverCompleteJsonObject(reasoning) : '';
+                if (recovered) {
+                    telemetry.reasoning_json_recovered = true;
+                    telemetry.reasoning_bytes = utf8ByteLength(reasoning);
+                    telemetry.content_bytes = utf8ByteLength(recovered);
+                    telemetry.received_bytes = Math.max(telemetry.received_bytes, telemetry.reasoning_bytes);
+                    notifyApiTelemetry(options, telemetry);
+                    return recovered;
+                }
                 var noContent = new Error('模型返回成功，但正文内容为空');
                 noContent.code = 'LUCIOLE_EMPTY_CONTENT';
                 throw noContent;
@@ -1699,6 +1778,13 @@
                         telemetry.received_bytes = telemetry.content_bytes + telemetry.reasoning_bytes;
                         notifyApiTelemetry(options, telemetry);
                         if (!trim(finalText)) {
+                            var recovered = options && options.allowReasoningJson ? recoverCompleteJsonObject(finalReasoning) : '';
+                            if (recovered) {
+                                telemetry.reasoning_json_recovered = true;
+                                telemetry.content_bytes = utf8ByteLength(recovered);
+                                notifyApiTelemetry(options, telemetry);
+                                return recovered;
+                            }
                             var empty = new Error(finalReasoning ? '酒馆连接配置只返回了思考过程，没有返回正文内容' : '酒馆连接配置流式结束，但没有返回正文内容');
                             empty.code = finalReasoning ? 'LUCIOLE_REASONING_ONLY' : 'LUCIOLE_EMPTY_CONTENT';
                             throw empty;
@@ -1817,6 +1903,7 @@
             scope: 'compiler',
             stream: apiRoute(kind).mode === 'custom' || apiRoute(kind).mode === 'st_profile',
             raw: apiRoute(kind).mode === 'current',
+            allowReasoningJson: true,
             onTelemetry: telemetrySink
         });
     }
@@ -2797,6 +2884,7 @@
             content_bytes: typeof row.content_bytes === 'number' ? Math.max(0, Math.round(row.content_bytes)) : null,
             event_count: typeof row.event_count === 'number' ? Math.max(0, Math.round(row.event_count)) : 0,
             saw_done: !!row.saw_done,
+            reasoning_json_recovered: !!row.reasoning_json_recovered,
             schema_fallback: !!row.schema_fallback,
             raw_fallback: !!row.raw_fallback
         };
@@ -2901,6 +2989,7 @@
             if (typeof row.reasoning_bytes === 'number' || typeof row.content_bytes === 'number') {
                 bits.push('思考 ' + (row.reasoning_bytes || 0) + ' / 正文 ' + (row.content_bytes || 0) + ' 字节');
             } else if (row.received_bytes) bits.push(row.received_bytes + ' 字节');
+            if (row.reasoning_json_recovered) bits.push('已接管误入思考通道的完整 JSON');
             lines.push(bits.join(' · '));
         }
         return lines.join('\n');
@@ -2935,6 +3024,16 @@
 
     function stagedCompileStepCount(input) { return 3 + stagedContentCount(input); }
 
+    function stagedCompletedFromDraft(input, draft, fallback, totalSteps) {
+        var completed = Math.max(0, parseInt(fallback, 10) || 0);
+        if (input && input.schedule_mode === 'smart_dispatch' && draft && isArray(draft.clues) && draft.clues.length) {
+            var target = Math.max(0, parseInt(input.candidate_target, 10) || draft.clues.length);
+            var present = Math.min(target, draft.clues.length);
+            completed = Math.max(completed, 3 + Math.ceil(present / SMART_STAGE_BATCH_SIZE));
+        }
+        return Math.min(Math.max(1, totalSteps || 1), completed);
+    }
+
     function stagedPartSchema(mode, keys) {
         var full = compileOutputSchema(mode);
         var props = {};
@@ -2951,7 +3050,7 @@
 
     function stagedPrompt(lines, schema) {
         return lines.concat([
-            '只输出一个完整 JSON 对象，不要解释、不要 Markdown、不要省略字段。',
+            '不要展开或展示思考过程；直接输出一个完整 JSON 对象，第一字符必须是 {。不要解释、不要 Markdown、不要省略字段。',
             '严格 Schema：', safeJson(schema)
         ]).join('\n');
     }
@@ -3338,6 +3437,7 @@
         var completed = checkpoint && checkpoint.strategy === 'staged' && checkpoint.draft
             ? Math.min(totalSteps, checkpoint.completed_batches || 0) : 0;
         var draft = completed ? normalizeCompileDraft(checkpoint.draft) : normalizeCompileDraft(blankCompileDraft());
+        completed = stagedCompletedFromDraft(input, draft, completed, totalSteps);
         var chain = Promise.resolve(draft);
         var basePayload = compilerPayload(input);
 
@@ -6880,7 +6980,7 @@
     }
 
     function init() {
-        console.log('[Luciole] v1.6.9 init 开始');
+        console.log('[Luciole] v1.6.10 init 开始');
         var c;
         try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
         try {
@@ -6907,7 +7007,7 @@
         if (t.WORLDINFO_SETTINGS_UPDATED) ev.on(t.WORLDINFO_SETTINGS_UPDATED, onSafetySourceChanged);
         if (t.PERSONA_CHANGED) ev.on(t.PERSONA_CHANGED, onSafetySourceChanged);
         if (t.CHARACTER_EDITED) ev.on(t.CHARACTER_EDITED, onSafetySourceChanged);
-        console.log('[Luciole] v1.6.9 三轨点灯 · 编译法条同步');
+        console.log('[Luciole] v1.6.10 三轨点灯 · 候选批稳定续跑');
     }
 
     if (typeof window !== 'undefined' && window.__LUCIOLE_TEST__) {
@@ -6981,6 +7081,7 @@
             callProfileApi: callProfileApi,
             callCurrentApi: callCurrentApi,
             callConnectionProfileApi: callConnectionProfileApi,
+            recoverCompleteJsonObject: recoverCompleteJsonObject,
             connectionManagerCapability: connectionManagerCapability,
             parseClientVersion: parseClientVersion,
             versionAtLeast: versionAtLeast,
@@ -6999,6 +7100,7 @@
             compileInput: compileInput,
             apiRouteForTests: apiRoute,
             stagedCompileStepCount: stagedCompileStepCount,
+            stagedCompletedFromDraft: stagedCompletedFromDraft,
             stagedSafePrompt: stagedSafePrompt,
             stagedCluePrompt: stagedCluePrompt,
             stagedStructurePrompt: stagedStructurePrompt,
