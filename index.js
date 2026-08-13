@@ -1,5 +1,5 @@
 /* ============================================================
- * Luciole v1.6.12 — 上帝视角剧本引擎 · 故事环境取材层
+ * Luciole v1.6.13 — 上帝视角剧本引擎 · 本地等价容错
  * 真相由 God 持有，演员只接收插件本地渲染的安全当程光。
  * 纪律：ES5 语法；零原型补丁；只用 SillyTavern 官方上下文 API。
  * ============================================================ */
@@ -2238,7 +2238,7 @@
                 : (mode === 'uniform'
                     ? '模式=均匀散落：必须生成正好 requested_count 条连续 seeds，不多不少；同一 claim 可在不同阶段拥有多条不同证据路径；每条一个 surface；各层 stage 单调且每次最多相邻升一档；clues 与 evidence_type_whitelist 必须为空。'
                     : '模式=AI监督：不生成 clues 或 seeds；只从 allowed_evidence_types 中选择证据形态白名单。动态 clue_id 尚不存在，因此条件不得引用未来 evidence ID；用可判定的 keyword_event、relation 或 world_event 表达资格。'),
-            'probe 必须用能辨认本条演出的专属短语或多语义槽组合，不能用“时间、记录、看见、保证”等泛词单独确认。优先让每个 probe phrase 不少于4字；若确实使用1-3字短词，必须提供至少3个彼此独立且都能实际命中的 groups，并令 hit_threshold≥3 且不超过 groups 数。均匀 seeds 的 probe_phrases 每项必须不少于4字。',
+            'probe 必须用能辨认本条演出的专属短语或多语义槽组合，不能用“时间、记录、看见、保证”等泛词单独确认。group 只有1个 phrase 时 logic 必须为 any；logic=all 至少需要2个 phrase。优先让每个 probe phrase 不少于4字；若确实使用1-3字短词，必须提供至少3个彼此独立且都能实际命中的 groups，并令 hit_threshold≥3 且不超过 groups 数。均匀 seeds 的 probe_phrases 每项必须不少于4字。',
             '输出前静默自检：逐项计数是否精确；所有 ID 是否唯一；condition、stage_plan 与 clue 引用是否双向接严；persona_safe 是否齐全且无秘密；每条候选是否有可靠 probe。发现不足必须在本次回答内补齐；预算紧张时压缩单条措辞和变体数，不能减少目标数量、截断 JSON、解释或请求下一轮。',
             '只输出一个 JSON 对象，无解释、无Markdown。严格服从以下由代码生成的 Schema：',
             safeJson(compileOutputSchema(mode))
@@ -2485,17 +2485,36 @@
         return '';
     }
 
+    function repairSingletonAllProbe(probe) {
+        var fixed = 0;
+        var groups = probe && isArray(probe.groups) ? probe.groups : [];
+        for (var g = 0; g < groups.length; g++) {
+            var phrases = groups[g] && isArray(groups[g].phrases) ? groups[g].phrases : [];
+            /* 单元素集合中 all 与 any 真值完全等价；只规范枚举，不改文字、阈值或剧情事实。 */
+            if (groups[g] && groups[g].logic === 'all' && phrases.length === 1) {
+                groups[g].logic = 'any';
+                fixed++;
+            }
+        }
+        return fixed;
+    }
+
     function repairClueProbes(clue, notes) {
         var variants = clue && isArray(clue.safe_variants) ? clue.safe_variants : [];
         var anyShort = false;
         var canRaise = !!variants.length;
         var desiredThreshold = 3;
+        var singletonAllFixed = 0;
         for (var i = 0; i < variants.length; i++) {
             var probe = variants[i].probe;
             var groups = probe && isArray(probe.groups) ? probe.groups : [];
+            singletonAllFixed += repairSingletonAllProbe(probe);
             if (probeContainsShortPhrase(probe)) anyShort = true;
             if (groups.length < 3) canRaise = false;
             desiredThreshold = Math.max(desiredThreshold, parseInt(probe && probe.hit_threshold, 10) || 1);
+        }
+        if (singletonAllFixed) {
+            localRepairNote(notes, clue.clue_id, singletonAllFixed + '个单短语 all 组已等价改为 any，短语与确认阈值均未改变');
         }
         if (!anyShort) return;
         if (canRaise) {
@@ -3383,7 +3402,7 @@
             '每条默认只写1个精炼 safe_variant，以缩短回包；同一真相从不同载体、场景、视角和证据性质横向长出不重复路径。',
             '写每条surface前先读environment_palette：线索必须自然使用其中至少一项环境锚点，证据载体、地点、机构、程序和人物关系不得越过constraints；不要在正文里输出source_ref或“环境锚点”等标签。',
             '每条 allowed_claim_ids 只能从该项 assignment.eligible_claim_ids 选择，不得跨层另取；列表为空就必须输出 []，只从公开前提长出不含答案的迹象。allowed_claim_ids 项数不得超过 strength_cap；revealed 前给迹象或验证材料，不直接复述结论。dormant/trace 的 nature 只可 observation/rumor；clue_strength=subtle 时任何档位也只可 observation/rumor。',
-            'probe 用能辨认本条演出的专属短语或多语义槽；不要用“时间、记录、看见、保证”等泛词单独确认。优先让每个 phrase 不少于4字；若确实使用1-3字短词，必须提供至少3个彼此独立且都能实际命中的 groups，hit_threshold≥3 且不得超过 groups 数。',
+            'probe 用能辨认本条演出的专属短语或多语义槽；group 只有1个 phrase 时 logic 必须为 any，logic=all 至少需要2个 phrase；不要用“时间、记录、看见、保证”等泛词单独确认。优先让每个 phrase 不少于4字；若确实使用1-3字短词，必须提供至少3个彼此独立且都能实际命中的 groups，hit_threshold≥3 且不得超过 groups 数。',
             'surface 与 anchor_text 禁止任何双花括号酒馆宏；角色名与玩家名直接写普通文字。'
         ], schema);
     }
@@ -3918,7 +3937,7 @@
             '每条候选1-3个安全变体与完整probe；allowed_claim_ids 只能选择与本条 layer 相同且达到该stage的 locked_claims；不得跨层另取，不得重复既有候选语义。',
             '每条候选必须遵守environment_palette并自然使用其中的环境锚点；不得引入与constraints冲突的卡外机构、科技、地点、程序或关系。',
             'dormant/trace只可observation/rumor；clue_strength=subtle时任何档位也只可observation/rumor；allowed_claim_ids项数不得超过strength_cap；每条必须能装入stage_capacity仍有空位的层×档。',
-            'probe优先全部使用不少于4字的专属短语；若确实使用1-3字短词，必须给至少3个可实际命中的独立groups，并令hit_threshold≥3且不超过groups数。',
+            'probe group只有1个phrase时logic必须为any，logic=all至少需要2个phrase。probe优先全部使用不少于4字的专属短语；若确实使用1-3字短词，必须给至少3个可实际命中的独立groups，并令hit_threshold≥3且不超过groups数。',
             '只输出一个JSON，无解释、无Markdown。Schema：', safeJson(smartRefillSchema(count))
         ].join('\n');
     }
@@ -5020,7 +5039,7 @@
             '只能从 legal_stage_moves 选择推进；只能复核 god_review_conditions 中的 cond_id。',
             'evidence_type、release_policy、boundary_policy、behavior_refs、anchor_scope 都只能从 payload 白名单选择。',
             'trace及更早只可observation/rumor。revealed之前不得直接复述命题结论；revealed且本层命题获准时才可直述该层事实，不得顺带揭更深层。',
-            'surface<=200字，anchor<=60字；不得凭空创造死亡、关键道具、NPC到场或关系承诺。probe必须能确认演员真的演出，不能靠泛词单命中。',
+            'surface<=200字，anchor<=60字；不得凭空创造死亡、关键道具、NPC到场或关系承诺。probe必须能确认演员真的演出，不能靠泛词单命中；group只有1个phrase时logic必须为any，logic=all至少需要2个phrase。',
             'action矩阵：hold无move且draft/policy为空；release有draft无move；advance有move且draft/policy为空；release_and_advance两者皆有；override至少一条override move，draft可空。',
             '只输出一个JSON，无解释、无Markdown。Schema：', safeJson(SUPERVISOR_OUTPUT_SCHEMA)
         ].join('\n');
@@ -5079,6 +5098,8 @@
         var localClue = null;
         var localVariant = null;
         if (release !== null) {
+            release = clone(release);
+            repairSingletonAllProbe(release.probe);
             if (!exactKeys(release, ['layer', 'stage', 'evidence_type', 'nature', 'allowed_claim_ids', 'surface', 'anchor_text', 'probe'])) errors.push('release_draft 字段非法');
             if (layerIndex(release.layer) < 0 || stageIndex(release.stage) < 0) errors.push('动态线索层或阶段非法');
             if ((ladder.safe_store.evidence_type_whitelist || []).indexOf(release.evidence_type) < 0) errors.push('动态证据形态不在白名单');
@@ -6202,7 +6223,10 @@
             var source = text.indexOf('角色卡') >= 0 ? '角色卡' : (text.indexOf('用户人设') >= 0 ? '用户人设' : '世界书');
             return source + '里仍残留秘密答案的特征；请先移除，再重新安检。';
         }
-        if (/环境素材盘|环境摘要|环境锚点|环境禁区|故事原料|environment_palette/.test(text)) {
+        var omittedMatch = text.match(/故事原料有\s*(\d+)\s*段因整段预算未送入 God/);
+        if (omittedMatch) return '角色卡或世界书有 ' + omittedMatch[1] + ' 段超出本次整段取材预算；其余资料与环境素材盘已经正常完成，未把长文截成可能变义的半句话。';
+        if (/当前角色卡、用户人设与世界书没有可供取材的正文/.test(text)) return '当前角色卡、用户人设和已启用世界书里没有读到可供环境取材的正文；God 将只沿用你填写的秘密与公开前提。';
+        if (/环境素材盘|环境摘要|环境锚点|环境禁区|environment_palette/.test(text)) {
             if (/秘密|指纹|夹带/.test(text)) return 'God 提炼环境时把秘密答案混进了公开素材盘，需要重新编译安全外壳。';
             if (/不存在|source_ref|引用/.test(text)) return 'God 写下的环境依据在角色卡或世界书里找不到，不能把卡外设定冒充原设。';
             return 'God 没有完整交回这张卡的环境素材盘，请重新编译安全外壳。';
@@ -7350,7 +7374,7 @@
     }
 
     function init() {
-        console.log('[Luciole] v1.6.12 init 开始');
+        console.log('[Luciole] v1.6.13 init 开始');
         var c;
         try { c = ctx(); } catch (e) { console.log('[Luciole] getContext 失败', e); return; }
         try {
@@ -7377,7 +7401,7 @@
         if (t.WORLDINFO_SETTINGS_UPDATED) ev.on(t.WORLDINFO_SETTINGS_UPDATED, onSafetySourceChanged);
         if (t.PERSONA_CHANGED) ev.on(t.PERSONA_CHANGED, onSafetySourceChanged);
         if (t.CHARACTER_EDITED) ev.on(t.CHARACTER_EDITED, onSafetySourceChanged);
-        console.log('[Luciole] v1.6.12 三轨点灯 · 故事环境取材层');
+        console.log('[Luciole] v1.6.13 三轨点灯 · 本地等价容错');
     }
 
     if (typeof window !== 'undefined' && window.__LUCIOLE_TEST__) {
@@ -7448,6 +7472,7 @@
             sanitizeDiagnosticText: sanitizeDiagnosticText,
             safeEndpoint: safeEndpoint,
             humanizeOperationError: humanizeOperationError,
+            humanizeValidationError: humanizeValidationError,
             operationErrorDetail: operationErrorDetail,
             diagnosticEntryHtml: diagnosticEntryHtml,
             openAiStreamEvent: openAiStreamEvent,
