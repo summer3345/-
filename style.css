@@ -300,3 +300,63 @@ body.reduced-motion .lcl2-firefly { animation: none; }
 .lcl2-picker-item:active, .lcl2-picker-item:hover {
     background: color-mix(in srgb, #e8a33d 16%, transparent);
 }
+
+/* ============ 进度条 ============ */
+.lcl2-bar {
+    position: relative;
+    height: 16px;
+    margin-top: 8px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 35%, transparent);
+    overflow: hidden;
+}
+.lcl2-bar-fill {
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, #b8792a, #e8a33d, #f2c568);
+    border-radius: 8px;
+    transition: width .4s ease;
+}
+.lcl2-bar-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: .74em;
+    letter-spacing: .5px;
+    text-shadow: 0 1px 2px rgba(0,0,0,.6);
+}
+
+/* 已弃徽章 */
+.lcl2-badge-dropped { background: #5a5145; color: #cfc4ae; text-decoration: line-through; }
+
+/* ============ 署名 ============ */
+.lcl2-footer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 12px 0 4px;
+    font-size: .8em;
+    opacity: .55;
+    letter-spacing: .5px;
+    user-select: none;
+}
+.lcl2-footer-fly { animation: lcl2-breathe 3.6s ease-in-out infinite; display: inline-block; }
+
+/* 手动加灯 */
+.lcl2-manual {
+    background: linear-gradient(135deg, #f2c568, #e8a33d) !important;
+    color: #1c1408 !important;
+    font-weight: 700;
+    border: none !important;
+}
+.lcl2-clue-fire {
+    cursor: pointer;
+    font-size: .9em;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: color-mix(in srgb, #e8a33d 20%, transparent);
+}
+.lcl2-clue-fire:active, .lcl2-clue-fire:hover { background: #e8a33d; color: #1c1408; }

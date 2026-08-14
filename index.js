@@ -106,7 +106,9 @@
             depth: 1,              // setExtensionPrompt 注入深度
             batch_size: DEFAULT_BATCH,
             show_floater: true,    // 萤火虫浮标（可停进避风塘）
-            api2: { url: '', key: '', model: '' }  // 调度员连接（智能调度用；留空复用编译连接）
+            api2: { url: '', key: '', model: '' },  // 调度员连接（智能调度用；留空复用编译连接）
+            ctx_strip: 'thinking, think, cot, reasoning, thought, plan, 思考, 思维链',  // 读上下文时剔除的标签块
+            ctx_prefer: ''          // 若填写：楼层中含任一此类标签块时，只取块内文本（如 正文, summary）
         };
     }
 
@@ -293,6 +295,36 @@
         return texts.join('\n');
     }
 
+    /* 楼层文本清洗：
+     * 1) prefer 标签命中 → 只取块内文本（如你的预设把正文/摘要包在专属标签里）；
+     * 2) 否则剥掉 strip 标签块（思维链等），其余原样保留。 */
+    function tagList(csv) {
+        return String(csv || '').split(/[,，]/).map(trim).filter(Boolean);
+    }
+
+    function escapeReg(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+    function cleanMessageText(raw) {
+        var text = String(raw || '');
+        var s = settings();
+        var prefer = tagList(s.ctx_prefer);
+        for (var p = 0; p < prefer.length; p++) {
+            var tag = escapeReg(prefer[p]);
+            var re = new RegExp('<' + tag + '[^>]*>([^]*?)</' + tag + '>', 'gi');
+            var m, picked = [];
+            while ((m = re.exec(text)) !== null) picked.push(trim(m[1]));
+            if (picked.length) return picked.join('\n');
+        }
+        var strip = tagList(s.ctx_strip);
+        for (var q = 0; q < strip.length; q++) {
+            var tag2 = escapeReg(strip[q]);
+            text = text.replace(new RegExp('<' + tag2 + '[^>]*>[^]*?</' + tag2 + '>', 'gi'), '');
+        }
+        // 顺手剥掉 HTML 注释块
+        text = text.replace(/<!--[^]*?-->/g, '');
+        return trim(text.replace(/\n{3,}/g, '\n\n'));
+    }
+
     /* 已有正文窗口：从最新往前取，跳过系统消息，总量封顶。
      * 直接给原文片段，不做二次摘要调用——少一次 API 就少一个失败点。
      * 返回 { text, count } */
@@ -305,7 +337,7 @@
             for (var i = chat.length - 1; i >= 0 && picked.length < msgLimit; i--) {
                 var m = chat[i];
                 if (!m || m.is_system) continue;
-                var body = trim(m.mes);
+                var body = cleanMessageText(m.mes);
                 if (!body) continue;
                 var line = (m.is_user ? '玩家' : (trim(m.name) || '角色')) + '：' + body;
                 if (total + line.length > charLimit) {
@@ -719,6 +751,11 @@
 
         var target = clamp(parseInt(st.config.clue_count, 10) || 10, 1, 200);
         st.config.clue_count = target;
+        var needRounds = target * clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
+        var planRounds = clamp(parseInt(st.config.total_rounds, 10) || 100, 1, 9999);
+        if (needRounds > planRounds * 1.2) {
+            log('提示：' + target + ' 条 × 每 ' + st.config.interval + ' 轮一条 ≈ ' + needRounds + ' 轮才能送完，超出预计 ' + planRounds + ' 轮。想在预计轮数内送完可减少条数或缩短间隔（不强制，按你的节奏来）。');
+        }
         var batchSize = clamp(parseInt(settings().batch_size, 10) || DEFAULT_BATCH, 1, 20);
 
         // 续跑：草稿里已有的定稿线索直接继承
@@ -846,9 +883,9 @@
         return st.clock.active_id ? findClue(st, st.clock.active_id) : null;
     }
 
-    function usedCount(st) {
+    function usedCount(st) {   // 语义：真正送出的条数（废弃不算送出）
         var n = 0;
-        for (var i = 0; i < st.clues.length; i++) if (st.clues[i].used) n++;
+        for (var i = 0; i < st.clues.length; i++) if (st.clues[i].used && !st.clues[i].dropped) n++;
         return n;
     }
 
@@ -1020,6 +1057,12 @@
                     var fresh = story();
                     if (!fresh || fresh.config.run_mode !== 'smart' || fresh.status !== 'lit') return;
                     if (picked) {
+                        var drops = matchDropsInText(raw, window_, picked.id);
+                        for (var d = 0; d < drops.length; d++) {
+                            var dc = findClue(fresh, drops[d]);
+                            if (dc && !dc.used) { dc.used = true; dc.dropped = true; }
+                        }
+                        if (drops.length) log('调度员废弃了 ' + drops.length + ' 条已被剧情越过的线索（作者模式里标"已弃"，可随时查看）。');
                         fresh.clock.planned = { for_round: nextRound, clue_id: picked.id };
                         log('调度员已为下一次机会选牌。');
                     } else {
@@ -1110,7 +1153,9 @@
         return [
             '你是隐藏叙事的调度员。下面有若干条候选舞台指示，请从中选出最贴合当前剧情现场的一条。',
             '你只有选牌权，没有创作权。',
-            '只输出所选那条的编号（形如 clue_xxxxx），不要输出任何其他文字。'
+            '第一行只输出所选那条的编号（形如 clue_xxxxx）。',
+            '若候选中有已被剧情明确越过、永远不再合适投放的条目，可另起一行输出：弃 编号（最多两条；拿不准就不要弃）。',
+            '除此之外不要输出任何其他文字。'
         ].join('\n');
     }
 
@@ -1135,6 +1180,22 @@
             if (pos >= 0 && pos < bestPos) { bestPos = pos; best = candidates[i]; }
         }
         return best;
+    }
+
+    /* 废弃解析：只认以「弃 / DROP」开头的行，只认候选窗口内的 id，
+     * 每次最多 2 条，且不能弃掉选中的那条——防小模型抽风清空池子。 */
+    function matchDropsInText(rawText, candidates, pickedId) {
+        var drops = [];
+        var lines = String(rawText || '').split(/\r?\n/);
+        for (var l = 0; l < lines.length && drops.length < 2; l++) {
+            var line = trim(lines[l]);
+            if (!/^(弃|DROP)/i.test(line)) continue;
+            for (var i = 0; i < candidates.length && drops.length < 2; i++) {
+                var id = candidates[i].id;
+                if (id !== pickedId && line.indexOf(id) >= 0 && drops.indexOf(id) < 0) drops.push(id);
+            }
+        }
+        return drops;
     }
 
     /* 调度员连接：独立配置，留空复用编译连接；小请求、零温度、短超时 */
@@ -1213,12 +1274,60 @@
         st.status = 'lit';
         if (!st.clock.lit_at) {
             st.clock.lit_at = nowIso();
+            try { st.clock.lit_at_floor = (ctx().chat || []).length; } catch (e) { st.clock.lit_at_floor = 0; }
             st.clock.round = 0;
             st.clock.next_due = 1;   // 点亮后的第一条玩家消息即是第一次机会（宪法 5.4）
         }
         saveStory();
         log('🕯 故事点亮。你的下一次行动，就是第一束光的机会。');
         toast('小萤火已点亮', 'success');
+        renderPanel();
+    }
+
+    /* 手动点灯：玩家嫌节奏慢时，立即投放一条（可指定），不等间隔。
+     * 排程从当前轮重新顺延；本条同样随下一次回复送出、走完整簿记。 */
+    function manualDispatch(clueId) {
+        var st = story();
+        if (!st) return toast('请先打开一个聊天', 'warning');
+        if (st.status !== 'lit') return toast('先点亮故事，才能手动加灯', 'warning');
+        if (st.config.run_mode === 'supervise') {
+            return toast('AI 监督模式由 God 掌灯；想加快节奏可把间隔调小', 'info');
+        }
+        if (st.clock.active_id) return toast('台上还有一条在演，等它随你的下一条消息退场后再点', 'warning');
+        var chosen = null;
+        if (clueId) {
+            chosen = findClue(st, clueId);
+            if (!chosen || chosen.used) return toast('这条不在待命队列里', 'warning');
+        } else {
+            var picked = pickClueForRound(st);
+            if (!picked) return toast('没有可投的线索了', 'warning');
+            chosen = picked.clue;
+        }
+        st.clock.active_id = chosen.id;
+        st.clock.planned = null;
+        chosen.delivered_count = 0;
+        injectText(chosen.text);
+        st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
+        saveStory();
+        log('手动加灯：一条线索' + (clueId ? '（你指定的）' : '') + '立即上台，将随下一次回复送出。后续排程从现在重新起算。');
+        toast('已加一束光', 'success');
+        renderPanel();
+    }
+
+    function concludeStory() {
+        var st = story();
+        if (!st || st.status !== 'lit') return toast('只有点亮中的故事可以完结', 'warning');
+        clearInjection();
+        var left = 0;
+        for (var i = 0; i < st.clues.length; i++) {
+            if (!st.clues[i].used) { st.clues[i].used = true; st.clues[i].dropped = true; left++; }
+        }
+        st.clock.active_id = null;
+        st.clock.planned = null;
+        st.status = 'finished';
+        saveStory();
+        log('故事完结。' + (left ? '剩余 ' + left + ' 条线索安静退场——它们是备料，不是任务。' : '所有线索恰好用尽。'));
+        toast('故事已完结', 'success');
         renderPanel();
     }
 
@@ -1236,7 +1345,7 @@
         var st = story();
         if (!st) return;
         clearInjection();
-        for (var i = 0; i < st.clues.length; i++) { st.clues[i].used = false; st.clues[i].delivered_count = 0; }
+        for (var i = 0; i < st.clues.length; i++) { st.clues[i].used = false; st.clues[i].dropped = false; st.clues[i].delivered_count = 0; }
         st.clock = blankStory().clock;
         st.clock.planned = null;
         if (st.status === 'lit' || st.status === 'finished') st.status = 'compiled';
@@ -1291,9 +1400,15 @@
             case 'lit': {
                 var current = activeClue(st);
                 var sent = st.clock.cursor;
+                var floorNow = 0;
+                try { floorNow = (ctx().chat || []).length; } catch (e) { }
+                var floorTag = floorNow ? '（酒馆第 ' + floorNow + ' 楼）' : '';
                 var base = st.config.run_mode === 'supervise'
-                    ? ('第 ' + st.clock.round + ' 轮 · God 已递 ' + sent + ' 程光')
-                    : ('第 ' + st.clock.round + ' 轮 · 已送 ' + sent + '/' + st.clues.length + ' 条');
+                    ? ('第 ' + st.clock.round + ' 轮' + floorTag + ' · God 已递 ' + sent + ' 程光')
+                    : ('第 ' + st.clock.round + ' 轮' + floorTag + ' · 已送 ' + sent + '/' + st.clues.length + ' 条');
+                if (st.clock.round === 0) {
+                    return { text: base + ' · 已点亮。', next: '你的下一条消息就是第一束光的机会，不用等间隔。' };
+                }
                 if (current && current.delivered_count > 0) {
                     return { text: base + ' · 一条线索正在演出中。', next: '正常继续对话即可；重抽也会带着它。' };
                 }
@@ -1311,7 +1426,8 @@
                         ? (p.god_text ? ' God 已设计好下一程。' : ' God 裁决暂缓。')
                         : ' God 将在空档里裁决。';
                 }
-                return { text: base + ' · 下一条预计在第 ' + st.clock.next_due + ' 轮。', next: '正常玩就好，到点它自己来。' + smartNote };
+                var gap = Math.max(0, st.clock.next_due - st.clock.round);
+                return { text: base + ' · 下一条预计在第 ' + st.clock.next_due + ' 轮（还差你 ' + gap + ' 条消息）。', next: '正常玩就好，到点它自己来。' + smartNote };
             }
             case 'finished':
                 return { text: '所有 ' + st.clues.length + ' 条线索都已送完。', next: '想再来一轮就「重置进度」，或「清空」开新故事。' };
@@ -1326,6 +1442,23 @@
         var line = statusLine();
         $root.find('.lcl2-status-text').text(line.text);
         $root.find('.lcl2-status-next').text(line.next ? '→ ' + line.next : '');
+        (function () {
+            var $bar = $root.find('.lcl2-bar');
+            if (!st || (st.status !== 'lit' && st.status !== 'finished')) { $bar.hide(); return; }
+            var pct = 0, label = '';
+            if (st.config.run_mode === 'supervise') {
+                var totalR = clamp(parseInt(st.config.total_rounds, 10) || 100, 1, 9999);
+                pct = Math.min(100, Math.round(st.clock.round / totalR * 100));
+                label = '轮数 ' + st.clock.round + ' / ' + totalR;
+            } else {
+                var totalC = st.clues.length || 1;
+                pct = Math.min(100, Math.round(st.clock.cursor / totalC * 100));
+                label = '线索 ' + st.clock.cursor + ' / ' + totalC;
+            }
+            $bar.show();
+            $bar.find('.lcl2-bar-fill').css('width', pct + '%');
+            $bar.find('.lcl2-bar-label').text(label);
+        }());
 
         // 表单值（仅当无焦点时回填，避免打字被覆盖）
         if (st) {
@@ -1348,6 +1481,8 @@
         fillIfIdle('#lcl2_api2_url', s.api2.url);
         fillIfIdle('#lcl2_api2_key', s.api2.key);
         fillIfIdle('#lcl2_api2_model', s.api2.model);
+        fillIfIdle('#lcl2_ctx_strip', s.ctx_strip);
+        fillIfIdle('#lcl2_ctx_prefer', s.ctx_prefer);
         $('#lcl2_use_tavern').prop('checked', !!s.use_tavern);
 
         renderClueList();
@@ -1386,11 +1521,14 @@
         var html = '';
         for (var j = 0; j < st.clues.length; j++) {
             var clue = st.clues[j];
-            var badge = clue.used ? '<span class="lcl2-badge lcl2-badge-used">已送</span>'
+            var badge = clue.dropped ? '<span class="lcl2-badge lcl2-badge-dropped">已弃</span>'
+                : clue.used ? '<span class="lcl2-badge lcl2-badge-used">已送</span>'
                 : (st.clock.active_id === clue.id ? '<span class="lcl2-badge lcl2-badge-active">台上</span>'
                     : '<span class="lcl2-badge">排队</span>');
+            var canDispatch = !clue.used && st.status === 'lit' && !st.clock.active_id && st.config.run_mode !== 'supervise';
             html += '<div class="lcl2-clue" data-id="' + esc(clue.id) + '">'
                 + '<div class="lcl2-clue-head">#' + (j + 1) + ' ' + badge
+                + (canDispatch ? '<span class="lcl2-clue-fire" title="立即投放这条">🕯 投</span>' : '')
                 + '<span class="lcl2-clue-del" title="删除这条">✕</span></div>'
                 + '<textarea class="lcl2-clue-text text_pole" rows="2">' + esc(clue.text) + '</textarea>'
                 + '</div>';
@@ -1452,6 +1590,8 @@
         s.api2.url = trim($('#lcl2_api2_url').val());
         s.api2.key = trim($('#lcl2_api2_key').val());
         s.api2.model = trim($('#lcl2_api2_model').val());
+        s.ctx_strip = String($('#lcl2_ctx_strip').val() || '');
+        s.ctx_prefer = String($('#lcl2_ctx_prefer').val() || '');
         saveSettings();
         return s;
     }
@@ -1491,6 +1631,7 @@
         '      <div class="lcl2-status">' +
         '        <div class="lcl2-status-text"></div>' +
         '        <div class="lcl2-status-next"></div>' +
+        '        <div class="lcl2-bar" style="display:none"><div class="lcl2-bar-fill"></div><span class="lcl2-bar-label"></span></div>' +
         '      </div>' +
 
         '      <details class="lcl2-sec" open><summary>① 故事</summary>' +
@@ -1501,7 +1642,7 @@
         '        <div class="lcl2-grid">' +
         '          <div><label class="lcl2-label">预计总轮数</label><input id="lcl2_total" class="text_pole" type="number" min="1"></div>' +
         '          <div><label class="lcl2-label">每隔几轮一条</label><input id="lcl2_interval" class="text_pole" type="number" min="1"></div>' +
-        '          <div><label class="lcl2-label">线索条数</label><input id="lcl2_count" class="text_pole" type="number" min="1" placeholder="自动"></div>' +
+        '          <div><label class="lcl2-label">线索条数<small class="lcl2-dim">（建议多备些当余量）</small></label><input id="lcl2_count" class="text_pole" type="number" min="1" placeholder="自动"></div>' +
         '          <div><label class="lcl2-label">线索力度</label><select id="lcl2_intensity" class="text_pole">' +
         '            <option value="gentle">轻柔</option><option value="standard" selected>标准</option><option value="clear">清晰</option>' +
         '          </select></div>' +
@@ -1529,6 +1670,11 @@
         '          <button id="lcl2_btn_light" class="menu_button">🕯 点亮</button>' +
         '          <button id="lcl2_btn_off" class="menu_button">熄灭</button>' +
         '          <button id="lcl2_btn_rewind" class="menu_button" title="删过楼可以用这个校正轮数">回拨一轮</button>' +
+        '          <button id="lcl2_btn_conclude" class="menu_button" title="剧情走到头了就收——没发完的线索安静退场">完结</button>' +
+        '        </div>' +
+        '        <div class="lcl2-row">' +
+        '          <button id="lcl2_btn_manual" class="menu_button lcl2-manual">✚ 再来一束光</button>' +
+        '          <span class="lcl2-dim">嫌节奏慢就点一下：立即投放下一条，不等间隔</span>' +
         '        </div>' +
         '        <div class="lcl2-row">' +
         '          <button id="lcl2_btn_reset" class="menu_button lcl2-danger-soft">重置进度</button>' +
@@ -1568,11 +1714,22 @@
         '          <button id="lcl2_btn_test2" class="menu_button">测试调度员</button>' +
         '          <span id="lcl2_test2_result" class="lcl2-dim"></span>' +
         '        </div>' +
+        '        <hr class="lcl2-hr">' +
+        '        <label class="lcl2-label"><b>上下文清洗</b>（编译取材与调度员/God 读楼层前先清洗，避免思维链噪音）</label>' +
+        '        <label class="lcl2-label">剔除这些标签块（逗号分隔）</label>' +
+        '        <input id="lcl2_ctx_strip" class="text_pole" type="text" placeholder="thinking, cot, 思维链">' +
+        '        <label class="lcl2-label">只取这些标签块的内容（可留空；填了且楼层里有，就只读块内文本，如你预设的正文/摘要标签）</label>' +
+        '        <input id="lcl2_ctx_prefer" class="text_pole" type="text" placeholder="例：正文, summary">' +
         '      </details>' +
 
         '      <details class="lcl2-sec"><summary>⑤ 日志</summary>' +
         '        <div id="lcl2_log" class="lcl2-log"></div>' +
         '      </details>' +
+
+        '      <div class="lcl2-footer">' +
+        '        <span class="lcl2-footer-fly">🕯</span>' +
+        '        <span>小萤火由三双手点亮 —— 江 · 波哥 Claude · 猫g GPT</span>' +
+        '      </div>' +
 
         '  </div>' +
         '</div>';
@@ -1680,6 +1837,10 @@
         $root.on('click', '#lcl2_btn_light', lightUp);
         $root.on('click', '#lcl2_btn_off', extinguish);
         $root.on('click', '#lcl2_btn_rewind', rewindOneRound);
+        $root.on('click', '#lcl2_btn_manual', function () { manualDispatch(null); });
+        $root.on('click', '#lcl2_btn_conclude', function () {
+            if (window.confirm('给这个故事收尾？没发完的线索会安静退场（不删除，作者模式仍可查看）。')) concludeStory();
+        });
         $root.on('click', '#lcl2_btn_reset', function () {
             if (window.confirm('把进度归零？线索会完整保留。')) resetProgress();
         });
@@ -1706,6 +1867,10 @@
             // 台上的线索被现场改文 → 立即刷新注入
             if (st.clock.active_id === id && st.status === 'lit') injectText(newText);
             saveStory();
+        });
+        $root.on('click', '.lcl2-clue-fire', function () {
+            var id = $(this).closest('.lcl2-clue').data('id');
+            manualDispatch(id);
         });
         $root.on('click', '.lcl2-clue-del', function () {
             var st = story();
