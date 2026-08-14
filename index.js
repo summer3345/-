@@ -104,7 +104,8 @@
             api: { url: '', key: '', model: '', timeout_s: 240, max_tokens: 4000, temperature: 0.8 },
             use_tavern: false,     // true = 用酒馆当前连接（raw/quiet 降级，非流式，可能超时）
             depth: 1,              // setExtensionPrompt 注入深度
-            batch_size: DEFAULT_BATCH
+            batch_size: DEFAULT_BATCH,
+            show_floater: true     // 萤火虫浮标（可停进避风塘）
         };
     }
 
@@ -1098,13 +1099,19 @@
 
     function panelHtml() {
         return '' +
-        '<div id="' + PANEL_ID + '" class="lcl2-root">' +
-        '  <div class="inline-drawer">' +
-        '    <div class="inline-drawer-toggle inline-drawer-header">' +
-        '      <b>🕯 小萤火 · 帷幕沙漏</b>' +
-        '      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>' +
-        '    </div>' +
-        '    <div class="inline-drawer-content">' +
+        '<div id="' + PANEL_ID + '" class="lcl2-panel" style="display:none">' +
+        '  <div class="lcl2-head">' +
+        '    <b>🕯 小萤火</b>' +
+        '    <span class="lcl2-head-ver">2.0</span>' +
+        '    <span id="lcl2_close" class="lcl2-close" title="关闭">✕</span>' +
+        '  </div>' +
+        '  <div class="lcl2-body">' +
+
+        '      <div class="lcl2-mode-row">' +
+        '        <button class="lcl2-mode lcl2-mode-on" data-mode="uniform">⏳ 帷幕沙漏<small>均匀散落</small></button>' +
+        '        <button class="lcl2-mode" data-mode="smart" disabled title="Phase 2 施工中">✨ 星星点灯<small>智能调度 · 施工中</small></button>' +
+        '        <button class="lcl2-mode" data-mode="ai" disabled title="Phase 3 施工中">🌫 迷雾森林<small>AI 监督 · 施工中</small></button>' +
+        '      </div>' +
 
         '      <div class="lcl2-status">' +
         '        <div class="lcl2-status-text"></div>' +
@@ -1113,9 +1120,9 @@
 
         '      <details class="lcl2-sec" open><summary>① 故事</summary>' +
         '        <label class="lcl2-label">隐藏脉络（写给小萤火的完整秘密，演员永远看不到这里）</label>' +
-        '        <textarea id="lcl2_secret" class="text_pole lcl2-secret" rows="6" placeholder="例：她并非本地人。十年前的那场大火……真正的纵火者是……她一直隐瞒的原因是……"></textarea>' +
+        '        <textarea id="lcl2_secret" class="text_pole lcl2-secret" rows="6" placeholder="例：她并非将军府的亲生小姐。二十年前生母把她托付至此，只留下半枚玉袖扣。她隐瞒身世，是为了护住一个还活着的人……"></textarea>' +
         '        <label class="lcl2-label">绝对禁词（线索里绝不能出现的词，逗号分隔，可留空）</label>' +
-        '        <input id="lcl2_banned" class="text_pole" type="text" placeholder="例：纵火，凶手的名字">' +
+        '        <input id="lcl2_banned" class="text_pole" type="text" placeholder="例：亲生，生母的名字">' +
         '        <div class="lcl2-grid">' +
         '          <div><label class="lcl2-label">预计总轮数</label><input id="lcl2_total" class="text_pole" type="number" min="1"></div>' +
         '          <div><label class="lcl2-label">每隔几轮一条</label><input id="lcl2_interval" class="text_pole" type="number" min="1"></div>' +
@@ -1171,13 +1178,21 @@
         '        <div id="lcl2_log" class="lcl2-log"></div>' +
         '      </details>' +
 
-        '    </div>' +
         '  </div>' +
         '</div>';
     }
 
+    function showPanel() { $('#' + PANEL_ID).show(); renderPanel(); }
+    function hidePanel() { $('#' + PANEL_ID).hide(); }
+    function togglePanel() {
+        var $p = $('#' + PANEL_ID);
+        if ($p.is(':visible')) $p.hide(); else showPanel();
+    }
+
     function bindPanelEvents() {
         var $root = $('#' + PANEL_ID);
+
+        $root.on('click', '#lcl2_close', hidePanel);
 
         $root.on('change input', '#lcl2_secret, #lcl2_banned, #lcl2_total, #lcl2_interval, #lcl2_count, #lcl2_intensity, #lcl2_author', function () {
             readFormIntoStory();
@@ -1250,14 +1265,79 @@
      * ================================================================ */
 
     function mountPanel() {
-        var $host = $('#extensions_settings');
-        if (!$host.length) $host = $('#extensions_settings2');
-        if (!$host.length) return false;
-        if ($('#' + PANEL_ID).length) return true;
-        $host.append(panelHtml());
-        bindPanelEvents();
+        var $body = $('body');
+        if (!$body.length) return false;
+        if (!$('#' + PANEL_ID).length) {
+            $body.append(panelHtml());
+            bindPanelEvents();
+        }
+        makeFloater();
+        makeSettingsEntry();
+        makeWandEntry();
         renderPanel();
         return true;
+    }
+
+    /* 萤火虫浮标：默认停在 #sheld 右下，可拖动；
+     * 结构与停泊属性兼容避风塘（Harbor Bar 会将其收进 #extensionHarborDock）。 */
+    function makeFloater() {
+        if ($('#lcl2_floater').length) return;
+        var host = $('#sheld');
+        var el = $('<div id="lcl2_floater" class="lcl2-floater" title="小萤火"></div>');
+        if (!host.length) { host = $('body'); el.addClass('lcl2-floater-fixed'); }
+        el.append('<span class="lcl2-firefly" aria-hidden="true"></span>');
+        host.append(el);
+        if (!settings().show_floater) el.hide();
+
+        var dragging = false, moved = false, ox = 0, oy = 0;
+        function start(x, y) { dragging = true; moved = false; var off = el.offset(); ox = x - off.left; oy = y - off.top; }
+        function move(x, y) {
+            if (!dragging) return;
+            // 被避风塘停泊时不允许拖走
+            if (el.closest('#extensionHarborDock').length) { dragging = false; return; }
+            moved = true;
+            el.css({ left: (x - ox) + 'px', top: (y - oy) + 'px', right: 'auto', bottom: 'auto' });
+        }
+        function end() { if (dragging && !moved) togglePanel(); dragging = false; }
+        el.on('mousedown', function (e) { start(e.pageX, e.pageY); e.preventDefault(); });
+        $(document).on('mousemove.lcl2', function (e) { move(e.pageX, e.pageY); }).on('mouseup.lcl2', end);
+        el.on('touchstart', function (e) { var t = e.originalEvent.touches[0]; start(t.pageX, t.pageY); });
+        el.on('touchmove', function (e) { var t = e.originalEvent.touches[0]; move(t.pageX, t.pageY); e.preventDefault(); });
+        el.on('touchend', end);
+    }
+
+    /* 扩展设置区只留一个两行小入口，避免长内容与其他扩展叠版 */
+    function makeSettingsEntry() {
+        if ($('#lcl2_drawer').length) return;
+        var $host = $('#extensions_settings2');
+        if (!$host.length) $host = $('#extensions_settings');
+        if (!$host.length) return;
+        $host.append(
+            '<div id="lcl2_drawer" class="inline-drawer">' +
+            '  <div class="inline-drawer-toggle inline-drawer-header"><b>🕯 小萤火 2.0</b>' +
+            '    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>' +
+            '  <div class="inline-drawer-content"><div class="lcl2-drawer-inner">' +
+            '    <button id="lcl2_open_panel" class="menu_button">打开小萤火面板</button>' +
+            '    <label class="checkbox_label"><input id="lcl2_show_floater" type="checkbox"><span>显示萤火虫浮标</span></label>' +
+            '  </div></div>' +
+            '</div>');
+        $('#lcl2_open_panel').on('click', showPanel);
+        $('#lcl2_show_floater').prop('checked', !!settings().show_floater).on('change', function () {
+            var s = settings();
+            s.show_floater = $(this).prop('checked');
+            saveSettings();
+            $('#lcl2_floater').toggle(s.show_floater);
+        });
+    }
+
+    /* 魔杖菜单入口 */
+    function makeWandEntry() {
+        if ($('#lcl2_wand').length) return;
+        var menu = $('#extensionsMenu');
+        if (!menu.length) return;
+        var item = $('<div id="lcl2_wand" class="list-group-item flex-container flexGap5 interactable" tabindex="0"><span class="lcl2-wand-dot"></span><span>小萤火</span></div>');
+        item.on('click', showPanel);
+        menu.append(item);
     }
 
     function bindChatEvents() {

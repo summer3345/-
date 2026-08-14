@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Claude Fable 5 × ripple",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "minimum_client_version": "1.14.0",
     "homePage": ""
 }

@@ -1,7 +1,78 @@
 /* Luciole 2.0 · 小萤火 —— 冷色看，暖色按 */
 
-.lcl2-root { margin-top: 6px; }
+/* ============ 浮窗面板（fixed overlay，与设置页布局彻底解耦） ============ */
+.lcl2-panel {
+    position: fixed;
+    top: 6vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(500px, 95vw);
+    max-height: 86vh;
+    display: flex;
+    flex-direction: column;
+    z-index: 30001;
+    background: var(--SmartThemeBlurTintColor, rgba(16, 20, 28, 0.97));
+    color: var(--SmartThemeBodyColor, #dde4ea);
+    border: 1px solid var(--SmartThemeBorderColor, #4a5568);
+    border-radius: 14px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, .55);
+    font-size: .92em;
+}
 
+.lcl2-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 60%, transparent);
+    flex: 0 0 auto;
+}
+.lcl2-head-ver { opacity: .5; font-size: .82em; }
+.lcl2-close {
+    margin-left: auto;
+    cursor: pointer;
+    opacity: .6;
+    padding: 2px 8px;
+    font-size: 1.05em;
+}
+.lcl2-close:hover { opacity: 1; }
+
+.lcl2-body {
+    overflow-y: auto;
+    padding: 8px 12px 14px;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* ============ 三模式选择行 ============ */
+.lcl2-mode-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+    margin: 4px 0 8px;
+}
+.lcl2-mode {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 7px 4px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 70%, transparent);
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: .9em;
+    line-height: 1.25;
+}
+.lcl2-mode small { opacity: .55; font-size: .76em; }
+.lcl2-mode:disabled { opacity: .38; cursor: not-allowed; }
+.lcl2-mode-on {
+    border-color: #e8a33d;
+    background: color-mix(in srgb, #e8a33d 14%, transparent);
+    font-weight: 600;
+}
+
+/* ============ 状态条 ============ */
 .lcl2-status {
     background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #1a1c22) 85%, #3a4a6a);
     border-left: 3px solid #e8a33d;
@@ -12,8 +83,9 @@
 .lcl2-status-text { font-weight: 600; line-height: 1.5; }
 .lcl2-status-next { opacity: .75; font-size: .9em; margin-top: 2px; }
 
+/* ============ 分节 ============ */
 .lcl2-sec {
-    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #444) 70%, transparent);
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 70%, transparent);
     border-radius: 6px;
     margin: 8px 0;
     padding: 0 10px 8px;
@@ -25,13 +97,7 @@
     user-select: none;
 }
 
-.lcl2-label {
-    display: block;
-    margin: 8px 0 3px;
-    font-size: .88em;
-    opacity: .8;
-}
-
+.lcl2-label { display: block; margin: 8px 0 3px; font-size: .88em; opacity: .8; }
 .lcl2-secret { width: 100%; box-sizing: border-box; resize: vertical; }
 
 .lcl2-grid {
@@ -42,51 +108,31 @@
 }
 .lcl2-grid input, .lcl2-grid select { width: 100%; box-sizing: border-box; }
 
-.lcl2-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 10px;
-}
+.lcl2-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 
-.lcl2-root .menu_button { min-width: 76px; }
+.lcl2-panel .menu_button { min-width: 76px; }
 #lcl2_btn_compile, #lcl2_btn_light {
     background: linear-gradient(135deg, #e8a33d, #d97f2b);
     color: #1c1408;
     font-weight: 700;
     border: none;
 }
-#lcl2_btn_compile:disabled, #lcl2_btn_light:disabled {
-    opacity: .45;
-    filter: grayscale(.6);
-}
+#lcl2_btn_compile:disabled, #lcl2_btn_light:disabled { opacity: .45; filter: grayscale(.6); }
 .lcl2-danger { border-color: #b5484d !important; color: #d98a8e !important; }
 .lcl2-danger-soft { border-color: #8a6d3b !important; }
 
 .lcl2-dim { opacity: .65; font-size: .9em; line-height: 1.5; }
 
-/* 线索卡片 */
+/* ============ 线索卡片 ============ */
 .lcl2-clue {
-    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #444) 60%, transparent);
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 60%, transparent);
     border-radius: 6px;
     padding: 6px 8px;
     margin: 6px 0;
 }
-.lcl2-clue-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: .85em;
-    margin-bottom: 4px;
-}
+.lcl2-clue-head { display: flex; align-items: center; gap: 8px; font-size: .85em; margin-bottom: 4px; }
 .lcl2-clue-text { width: 100%; box-sizing: border-box; resize: vertical; font-size: .92em; }
-.lcl2-clue-del {
-    margin-left: auto;
-    cursor: pointer;
-    opacity: .5;
-    padding: 0 4px;
-}
+.lcl2-clue-del { margin-left: auto; cursor: pointer; opacity: .5; padding: 0 4px; }
 .lcl2-clue-del:hover { opacity: 1; color: #d98a8e; }
 
 .lcl2-badge {
@@ -98,25 +144,91 @@
 .lcl2-badge-active { background: #e8a33d; color: #1c1408; font-weight: 700; }
 .lcl2-badge-used { background: #3d6b4a; color: #d8f0dd; }
 
-/* 日志 */
-.lcl2-log {
-    max-height: 220px;
-    overflow-y: auto;
-    font-size: .85em;
-    line-height: 1.6;
-    padding: 4px 0;
-}
+/* ============ 日志 ============ */
+.lcl2-log { max-height: 220px; overflow-y: auto; font-size: .85em; line-height: 1.6; padding: 4px 0; }
 .lcl2-log-line { padding: 1px 0; word-break: break-word; }
-.lcl2-log-time {
-    opacity: .5;
-    margin-right: 8px;
-    font-family: monospace;
-    font-size: .9em;
+.lcl2-log-time { opacity: .5; margin-right: 8px; font-family: monospace; font-size: .9em; }
+
+/* ============ 萤火虫浮标 ============ */
+.lcl2-floater {
+    position: absolute;
+    right: 10px;
+    bottom: 90px;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    z-index: 30000;
+    cursor: pointer;
+    touch-action: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle, rgba(255, 224, 130, .12) 0%, rgba(232, 163, 61, .05) 45%, transparent 72%);
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+.lcl2-floater-fixed { position: fixed; right: 12px; bottom: 140px; }
+.lcl2-firefly {
+    display: block;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    pointer-events: none;
+    background: radial-gradient(circle at 38% 32%,
+        rgba(255, 255, 245, 1) 0%,
+        rgba(255, 244, 190, .98) 20%,
+        rgba(248, 205, 105, .92) 40%,
+        rgba(232, 163, 61, .6) 60%,
+        rgba(180, 120, 50, .2) 78%,
+        transparent 100%);
+    box-shadow:
+        0 1px 2px rgba(40, 30, 10, .3),
+        0 0 5px 1px rgba(255, 232, 148, .8),
+        0 0 12px 4px rgba(240, 190, 90, .4),
+        0 0 26px 9px rgba(200, 150, 60, .15);
+    animation: lcl2-breathe 3.6s ease-in-out infinite;
+}
+@keyframes lcl2-breathe {
+    0%, 100% { transform: scale(1); opacity: .92; }
+    50% { transform: scale(1.12); opacity: 1; }
+}
+body.reduced-motion .lcl2-firefly { animation: none; }
+
+/* 避风塘停泊态：被收进 dock 时收敛体积与光晕 */
+#extensionHarborDock .lcl2-floater,
+#extensionHarborDock #lcl2_floater[data-harbor-parked="1"] {
+    position: static;
+    width: 34px;
+    height: 34px;
+    background: transparent;
+}
+#extensionHarborDock .lcl2-firefly {
+    width: 15px;
+    height: 15px;
+    box-shadow:
+        0 0 4px 1px rgba(255, 232, 148, .7),
+        0 0 9px 3px rgba(240, 190, 90, .3);
+    animation: lcl2-breathe 4.4s ease-in-out infinite;
 }
 
-/* 移动端 */
+/* 魔杖菜单圆点 */
+.lcl2-wand-dot {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #f2c568;
+    box-shadow: 0 0 6px 2px rgba(242, 197, 104, .5);
+}
+
+/* 设置区小入口 */
+.lcl2-drawer-inner { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 6px 0; }
+
+/* ============ 移动端 ============ */
 @media (max-width: 600px) {
+    .lcl2-panel { top: 3vh; max-height: 90vh; width: 96vw; }
     .lcl2-grid { grid-template-columns: 1fr 1fr; }
-    .lcl2-root .menu_button { flex: 1 1 auto; }
+    .lcl2-panel .menu_button { flex: 1 1 auto; }
     .lcl2-log { max-height: 160px; }
+    .lcl2-mode small { display: none; }
 }
