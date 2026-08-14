@@ -287,6 +287,33 @@
         return texts.join('\n');
     }
 
+    /* 已有正文窗口：从最新往前取，跳过系统消息，总量封顶。
+     * 直接给原文片段，不做二次摘要调用——少一次 API 就少一个失败点。
+     * 返回 { text, count } */
+    function recentStoryText(msgLimit, charLimit) {
+        try {
+            var c = ctx();
+            var chat = c.chat || [];
+            var picked = [];
+            var total = 0;
+            for (var i = chat.length - 1; i >= 0 && picked.length < msgLimit; i--) {
+                var m = chat[i];
+                if (!m || m.is_system) continue;
+                var body = trim(m.mes);
+                if (!body) continue;
+                var line = (m.is_user ? '玩家' : (trim(m.name) || '角色')) + '：' + body;
+                if (total + line.length > charLimit) {
+                    // 装不下整条就停：只收整条消息，不切半句话
+                    if (picked.length === 0) picked.unshift(line.slice(0, charLimit) + '……（本条超长截断）');
+                    break;
+                }
+                picked.unshift(line);
+                total += line.length;
+            }
+            return { text: picked.join('\n'), count: picked.length };
+        } catch (e) { return { text: '', count: 0 }; }
+    }
+
     /* 返回 Promise<{ text, sources: [名字], missed: [原因] }> */
     function readCharacterWorldBooks(limit) {
         var c = ctx();
@@ -321,7 +348,26 @@
             }(records[a]));
         }
         return Promise.all(loaders).then(function () {
-            return { text: boundedText(texts.join('\n---\n'), limit), sources: sources, missed: missed };
+            // 去重：酒馆导入内嵌书时常会同时把它落成独立世界书并绑为角色主书，
+            // 两个入口指向同一份内容。按归一化文本比对，重复的只保留第一份。
+            var seen = {};
+            var uniqueTexts = [];
+            var uniqueSources = [];
+            var dropped = [];
+            for (var i = 0; i < texts.length; i++) {
+                var norm = String(texts[i]).replace(/\s+/g, '');
+                var key = simpleHash(norm) + '_' + norm.length;
+                if (seen[key]) { dropped.push(sources[i]); continue; }
+                seen[key] = true;
+                uniqueTexts.push(texts[i]);
+                uniqueSources.push(sources[i]);
+            }
+            return {
+                text: boundedText(uniqueTexts.join('\n---\n'), limit),
+                sources: uniqueSources,
+                deduped: dropped,
+                missed: missed
+            };
         });
     }
 
@@ -571,6 +617,7 @@
         parts.push('【完整秘密（绝密，仅你可见）】\n' + st.hidden_secret);
         if (materials.card) parts.push('【角色与开场设定（演员可见的公开信息）】\n' + materials.card);
         if (materials.world) parts.push('【世界环境素材（埋线索的土壤）】\n' + materials.world);
+        if (materials.story) parts.push('【已有剧情（最近进展）】\n' + materials.story + '\n\n线索必须衔接以上现场：沿用已出现的人物、地点与正在进行的情节，不与已发生的事实矛盾，不重复已经被玩家注意到的迹象。');
         if (existingClues.length) {
             parts.push('【已定稿的前序线索（不要重复它们的意象和载体）】\n' +
                 existingClues.map(function (c, i) { return (i + 1) + '. ' + c; }).join('\n'));
@@ -639,16 +686,22 @@
         compileState.cancel = false;
         setCompileUi(true, '准备取材……');
 
-        var materials = { card: '', world: '', missed: [] };
+        var materials = { card: '', world: '', story: '', missed: [] };
 
         return Promise.resolve().then(function () {
             materials.card = characterCardText(4000);
+            var recent = recentStoryText(40, 8000);
+            materials.story = recent.text;
+            materials.story_count = recent.count;
             return readCharacterWorldBooks(6000);
         }).then(function (wb) {
             materials.world = wb.text;
             materials.missed = wb.missed;
-            if (wb.sources.length) log('取材完成：角色卡 + ' + wb.sources.join('、'));
-            else log('取材完成：角色卡（未发现角色世界书，属正常）');
+            var picked = ['角色卡'];
+            if (wb.sources.length) picked = picked.concat(wb.sources);
+            picked.push(materials.story_count > 0 ? ('最近正文 ' + materials.story_count + ' 条') : '正文（空聊天，跳过）');
+            log('取材完成：' + picked.join(' + '));
+            if (wb.deduped && wb.deduped.length) log('已去重：' + wb.deduped.join('、') + ' 与已读内容相同，只保留一份。');
             for (var m = 0; m < wb.missed.length; m++) log('⚠ ' + wb.missed[m]);
             return runBatches();
         }).then(function () {
@@ -1101,16 +1154,16 @@
         return '' +
         '<div id="' + PANEL_ID + '" class="lcl2-panel" style="display:none">' +
         '  <div class="lcl2-head">' +
-        '    <b>🕯 小萤火</b>' +
+        '    <b>🕯 小萤火 · 帷幕沙漏</b>' +
         '    <span class="lcl2-head-ver">2.0</span>' +
         '    <span id="lcl2_close" class="lcl2-close" title="关闭">✕</span>' +
         '  </div>' +
         '  <div class="lcl2-body">' +
 
         '      <div class="lcl2-mode-row">' +
-        '        <button class="lcl2-mode lcl2-mode-on" data-mode="uniform">⏳ 帷幕沙漏<small>均匀散落</small></button>' +
-        '        <button class="lcl2-mode" data-mode="smart" disabled title="Phase 2 施工中">✨ 星星点灯<small>智能调度 · 施工中</small></button>' +
-        '        <button class="lcl2-mode" data-mode="ai" disabled title="Phase 3 施工中">🌫 迷雾森林<small>AI 监督 · 施工中</small></button>' +
+        '        <button class="lcl2-mode lcl2-mode-on" data-mode="uniform">⏳ 均匀散落<small>提前排好 · 按时发牌</small></button>' +
+        '        <button class="lcl2-mode" data-mode="smart" disabled title="Phase 2 施工中">🃏 智能调度<small>小模型现场选牌 · 施工中</small></button>' +
+        '        <button class="lcl2-mode" data-mode="supervise" disabled title="Phase 3 施工中">👁 AI 监督<small>God 现场设计 · 施工中</small></button>' +
         '      </div>' +
 
         '      <div class="lcl2-status">' +
