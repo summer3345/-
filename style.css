@@ -610,3 +610,15 @@ body.reduced-motion .lcl2-footer-fly { animation: none; }
     .lcl2-preset-row select { flex: 1 1 100%; }
     .lcl2-preset-row .menu_button { flex: 1 1 auto; }
 }
+
+/* ============ ✨ 星星点灯 ============ */
+.lcl2-star-add textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+.lcl2-star-sel { flex: 1 1 auto; min-width: 0; }
+.lcl2-star {
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 55%, transparent);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin: 6px 0;
+}
+.lcl2-star-wish { font-size: .92em; line-height: 1.5; margin-top: 2px; word-break: break-word; }
+.lcl2-star-status { margin: 4px 0 8px; line-height: 1.5; }

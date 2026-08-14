@@ -32,6 +32,9 @@
 
     var EXT_NAME = 'luciole_v2';
     var INJECT_KEY = 'luciole_v2_clue';
+    var INJECT_KEY_STAR = 'luciole_v2_star';   // 星星点灯独立注入通道，与线索并行不干扰
+    var WISH_OVERLAP_WINDOW = 6;               // 愿望原文指纹窗口（铁律1的机器实现）
+    var STAR_MAX_PER_SIDE = 12;                // 亮星/暗星各自上限
     var PANEL_ID = 'lcl2_panel';
     var LOG_LIMIT = 120;
     var SECRET_OVERLAP_WINDOW = 12;   // 秘密原文连续重合检查窗口（字符）
@@ -110,6 +113,16 @@
     /* 与秘密原文的连续片段重合检查：
      * 对秘密文本做长度 SECRET_OVERLAP_WINDOW 的滑动窗口，
      * 任一窗口若原样出现在线索里则判定泄漏。纯本地、可严格证明。 */
+    function windowOverlap(textA, textB, win) {
+        var a = String(textA || '').replace(/\s+/g, '');
+        var b = String(textB || '').replace(/\s+/g, '');
+        if (b.length < win) return false;
+        for (var i = 0; i + win <= b.length; i++) {
+            if (a.indexOf(b.substr(i, win)) >= 0) return true;
+        }
+        return false;
+    }
+
     function overlapsSecret(clueText, secretText) {
         var clue = String(clueText || '');
         var secret = String(secretText || '').replace(/\s+/g, '');
@@ -731,6 +744,7 @@
             '3. 每条线索是写给"扮演角色的演员"看的舞台指示，告诉演员这一幕可以自然带出什么迹象。用第二人称祈使或描述句，例如"让她整理旧物时，一枚不属于这个家的袖扣从抽屉深处滚出来"。',
             '4. 线索必须扎根于给定的角色与世界环境，用其中真实存在的地点、物件、习俗和人物关系做载体。',
             '5. 每条线索 30～80 字。不要编号，不要解释，不要出现"线索""秘密""真相"这些出戏的词。',
+            '5b. 线索里如需引用文字（招牌、登记簿、门牌、只言片语），一律用中文引号「」，绝对不要使用英文双引号 " ——它会破坏输出格式。',
             '6. 力度要求——{{力度}}',
             '{{禁词}}'
         ].join('\n'),
@@ -878,12 +892,36 @@
         return parts.join('\n\n');
     }
 
+    /* 宽松兜底：模型在线索正文里写了未转义英文引号时，标准 JSON.parse 必炸。
+     * 针对 {"clues":[...]} 这一种固定形状手工切分：
+     * 取 clues 后的数组体，按 「引号,引号」 分隔模式切条，条内残留引号原样保留。 */
+    function looseParseClues(raw) {
+        var m = String(raw).match(/"clues"\s*:\s*\[/);
+        if (!m) return null;
+        var start = m.index + m[0].length;
+        var end = String(raw).lastIndexOf(']');
+        if (end <= start) return null;
+        var body = String(raw).slice(start, end);
+        var parts = body.split(/"\s*,\s*"/);
+        var out = [];
+        for (var i = 0; i < parts.length; i++) {
+            var t = trim(parts[i]).replace(/^"+/, '').replace(/"+\s*$/, '');
+            t = trim(t);
+            if (t) out.push(t);
+        }
+        return out.length ? out : null;
+    }
+
     function parseCluesJson(rawText) {
         var raw = trim(rawText).replace(/^```(?:json)?/i, '').replace(/```$/, '');
         var jsonText = recoverJsonObject(raw) || raw;
         var data;
         try { data = JSON.parse(jsonText); }
-        catch (e) { throw new Error('模型输出无法解析为 JSON（前 100 字）：' + raw.slice(0, 100)); }
+        catch (e) {
+            var rescued = looseParseClues(raw);
+            if (rescued) return rescued;
+            throw new Error('模型输出无法解析为 JSON（前 100 字）：' + raw.slice(0, 100));
+        }
         var list = data && data.clues;
         if (!isArray(list)) throw new Error('模型输出里没有 clues 数组。');
         var out = [];
@@ -1813,6 +1851,58 @@
 
     var clueListDirty = false;   // 因用户正在打字而跳过的重建，失焦后补上
 
+    function renderStarPanel() {
+        var $host = $('#lcl2_star_list');
+        if (!$host.length) return;
+        var sc = starChart();
+        if (!sc) { $host.html('<div class="lcl2-dim">（先打开一个聊天）</div>'); return; }
+        var counts = starCounts(sc);
+        var statusText;
+        if (!sc.locked) {
+            statusText = sc.stars.length
+                ? ('草稿：亮星 ' + counts.bright + ' · 暗星 ' + counts.dark + '。写好就「交给小萤火」。')
+                : '还没有星星。亮星写想去的方向，暗星写禁区——愿望原文永远不会被演员看到。';
+        } else if (sc.blind) {
+            statusText = '✨ 领航中（盲档）· 第 ' + sc.s_round + ' 轮 · 待点 ' + (counts.bright - counts.lit >= 0 ? countWaiting(sc) : 0) + ' 颗 · 已点亮 ' + counts.lit + ' 颗';
+        } else {
+            var eta = Math.max(0, sc.s_next_due - sc.s_round);
+            statusText = '✨ 领航中 · 第 ' + sc.s_round + ' 轮 · 已点亮 ' + counts.lit + ' 颗 · 下次抬头还差 ' + eta + ' 条消息'
+                + (sc.planned ? (sc.planned.kind === 'idle' ? ' · 领航员：顺其自然' : ' · 领航员已备好下一程') : '');
+        }
+        $('.lcl2-star-status').text(statusText);
+
+        var html = '';
+        for (var i = 0; i < sc.stars.length; i++) {
+            var s = sc.stars[i];
+            var icon = s.polarity === 'dark' ? '🌑' : '🌟';
+            var stateBadge = s.status === 'lit'
+                ? '<span class="lcl2-badge lcl2-badge-used">已点亮' + (sc.blind ? '' : (s.lit_round != null ? ' · 第' + s.lit_round + '轮' : '')) + '</span>'
+                : '<span class="lcl2-badge">待命</span>';
+            var wishShown = (sc.blind && sc.locked) ? '（盲档领航中，完结后复盘可见）' : esc(s.wish);
+            var dots = s.weight === 3 ? '●●●' : (s.weight === 1 ? '●' : '●●');
+            html += '<div class="lcl2-star" data-id="' + esc(s.id) + '">'
+                + '<div class="lcl2-clue-head">' + icon + ' ' + esc(s.id) + ' <span class="lcl2-dim">' + dots + '</span> ' + stateBadge
+                + (sc.locked ? '' : '<span class="lcl2-clue-del lcl2-star-del" title="摘下这颗星">✕</span>')
+                + '</div>'
+                + '<div class="lcl2-star-wish">' + wishShown + '</div>'
+                + '</div>';
+        }
+        $host.html(html || '<div class="lcl2-dim">（星图还空着）</div>');
+
+        fillIfIdle('#lcl2_star_interval', sc.interval);
+        $('#lcl2_star_blind').prop('checked', !!sc.blind);
+        $('#lcl2_star_lock').text(sc.locked ? '解锁星图' : '✨ 交给小萤火');
+        $('#lcl2_star_look').toggle(!!sc.locked);
+        var storyDone = (story() && story().status === 'finished');
+        $('#lcl2_star_reveal').toggle(!!(sc.blind && sc.locked && storyDone));
+    }
+
+    function countWaiting(sc) {
+        var n = 0;
+        for (var i = 0; i < sc.stars.length; i++) if (sc.stars[i].polarity !== 'dark' && sc.stars[i].status === 'waiting') n++;
+        return n;
+    }
+
     var logRenderTimer = null;
     function renderLogSoon() {
         if (logRenderTimer) return;
@@ -2146,6 +2236,37 @@
         $root.on('click', '#lcl2_btn_off', extinguish);
         $root.on('click', '#lcl2_btn_rewind', rewindOneRound);
         $root.on('click', '#lcl2_btn_manual', function () { manualDispatch(null); });
+
+        // ✨ 星星点灯
+        $root.on('click', '#lcl2_star_addbtn', function () {
+            story();
+            addStar(String($('#lcl2_star_pol').val()), String($('#lcl2_star_wish').val()), $('#lcl2_star_w').val());
+            $('#lcl2_star_wish').val('');
+        });
+        $root.on('click', '.lcl2-star-del', function () {
+            removeStar($(this).closest('.lcl2-star').data('id'));
+        });
+        $root.on('change input', '#lcl2_star_interval', function () {
+            var sc = starChart();
+            if (sc) { sc.interval = clamp(parseInt($(this).val(), 10) || 10, 5, 999); saveStory(); }
+        });
+        $root.on('change', '#lcl2_star_blind', function () {
+            var sc = starChart();
+            if (sc) { sc.blind = $(this).prop('checked'); saveStory(); renderStarPanel(); }
+        });
+        $root.on('click', '#lcl2_star_lock', function () {
+            var sc = starChart();
+            if (sc) lockStarChart(!sc.locked);
+        });
+        $root.on('click', '#lcl2_star_look', starManualLook);
+        $root.on('click', '#lcl2_star_reveal', function () {
+            var sc = starChart();
+            if (!sc) return;
+            sc.blind = false;
+            saveStory();
+            starLog(sc, '🌠 复盘解封：哪一轮、哪颗星、许的什么愿——原来那天下雨，是你自己许的。');
+            renderStarPanel();
+        });
         $root.on('click', '#lcl2_btn_conclude', function () {
             if (window.confirm('给这个故事收尾？没发完的线索会安静退场（不删除，作者模式仍可查看）。')) concludeStory();
         });
@@ -2308,6 +2429,363 @@
         });
     }
 
+
+    /* ================================================================
+     * 10. ✨ 星星点灯（第二幕 · 愿望节奏引擎）
+     *  「星语不落地」：愿望原文只进领航员的眼睛，永不下发演员。
+     *  「弯路不弯真相」：星星推的是路，无权碰秘密与线索账本。
+     *  「暗星高于亮星」：撞暗星时本次只矫正，不点新星。
+     *  「无空洞感」：增删、锁定、点亮、空转，全部留痕。
+     *  独立器官：可与帷幕沙漏同挂，也可素跑（story 不点亮照样运转）。
+     * ================================================================ */
+
+    function blankStarChart() {
+        return {
+            v: 1,
+            locked: false,
+            blind: false,
+            interval: 10,
+            s_round: 0,          // 星图自己的相对轮钟（锁定=第 0 轮），素跑不依赖 story
+            s_next_due: 1,
+            stars: [],           // { id, polarity:'bright'|'dark', wish, weight:1|2|3, status:'waiting'|'lit'|'retired', lit_round }
+            active: null,        // { star_id|null, kind, text, delivered }
+            planned: null        // { for_round, kind:'advance'|'correct'|'idle', star_id, text }
+        };
+    }
+
+    function starChart() {
+        var c = ctx();
+        var meta = c.chatMetadata;
+        if (!isObject(meta)) return null;
+        var root = meta[EXT_NAME];
+        if (!isObject(root)) return null;   // story() 会建根；星图挂在同一根下
+        if (!isObject(root.star_chart)) root.star_chart = blankStarChart();
+        var sc = root.star_chart;
+        var d = blankStarChart();
+        for (var k in d) if (sc[k] === undefined) sc[k] = d[k];
+        if (!isArray(sc.stars)) sc.stars = [];
+        return sc;
+    }
+
+    function findStar(sc, id) {
+        for (var i = 0; i < sc.stars.length; i++) if (sc.stars[i].id === id) return sc.stars[i];
+        return null;
+    }
+
+    function starCounts(sc) {
+        var bright = 0, dark = 0, lit = 0;
+        for (var i = 0; i < sc.stars.length; i++) {
+            if (sc.stars[i].polarity === 'dark') dark++; else bright++;
+            if (sc.stars[i].status === 'lit') lit++;
+        }
+        return { bright: bright, dark: dark, lit: lit };
+    }
+
+    /* ---- 星事件安检：愿望指纹 + 宏 + 禁词 + 长度（四道是非题，家规平移） ---- */
+    function vetStarText(text, sc) {
+        var st = story();
+        var t = trim(text);
+        if (!t) return { pass: false, reason: '正文为空' };
+        if (t.length > 300) return { pass: false, reason: '超长（' + t.length + ' 字）' };
+        if (hasResidualMacro(t)) return { pass: false, reason: '包含酒馆宏 {{...}}' };
+        if (st) {
+            var banned = containsBanned(t, st.banned_words);
+            if (banned) return { pass: false, reason: '包含禁词「' + banned + '」' };
+        }
+        for (var i = 0; i < sc.stars.length; i++) {
+            if (windowOverlap(t, sc.stars[i].wish, WISH_OVERLAP_WINDOW)) {
+                return { pass: false, reason: '与愿望原文有 ' + WISH_OVERLAP_WINDOW + ' 字以上连续重合（星语不落地）' };
+            }
+        }
+        return { pass: true, text: t };
+    }
+
+    /* ---- 注入 ---- */
+    function starInject(text) {
+        var packed = [
+            '【剧情航向 · 仅本回合】',
+            text,
+            '（这是世界里自然发生的事，顺着它演即可，不要向玩家提及这段指示。）'
+        ].join('\n');
+        if (hasResidualMacro(packed)) packed = '';
+        var c = ctx();
+        var depth = clamp(parseInt(settings().depth, 10) || 1, 0, 20);
+        try { c.setExtensionPrompt(INJECT_KEY_STAR, packed, 1, depth, false, 0); }
+        catch (e) { try { c.setExtensionPrompt(INJECT_KEY_STAR, packed, 1, depth); } catch (e2) { } }
+    }
+    function starClearInjection() {
+        var c = ctx();
+        try { c.setExtensionPrompt(INJECT_KEY_STAR, '', 1, 1, false, 0); }
+        catch (e) { try { c.setExtensionPrompt(INJECT_KEY_STAR, '', 1, 1); } catch (e2) { } }
+    }
+
+    /* ---- 运行时（与线索通道并行；素跑无碍） ---- */
+
+    function starOnUserMessage() {
+        var sc = starChart();
+        if (!sc || !sc.locked) return;
+
+        // 清算上一个回复位
+        if (sc.active) {
+            if (sc.active.delivered > 0) {
+                if (sc.active.star_id) {
+                    var doneStar = findStar(sc, sc.active.star_id);
+                    if (doneStar) { doneStar.status = 'lit'; doneStar.lit_round = sc.s_round; }
+                }
+                starLog(sc, sc.active.kind === 'correct' ? '一次航向矫正已完成。' : '一颗星已点亮，落进了故事里。');
+                sc.active = null;
+                starClearInjection();
+            }
+            // delivered==0：玩家连发，原地等待
+        }
+
+        sc.s_round += 1;
+
+        // 到点且台上无星 → 消费预裁决
+        if (!sc.active && sc.s_round >= sc.s_next_due) {
+            var plan = sc.planned;
+            sc.planned = null;
+            if (plan && plan.for_round === sc.s_round && plan.kind === 'advance' && plan.text) {
+                var star = findStar(sc, plan.star_id);
+                if (star && star.status === 'waiting') {
+                    sc.active = { star_id: star.id, kind: 'advance', text: plan.text, delivered: 0 };
+                    starInject(plan.text);
+                    sc.s_next_due = sc.s_round + clamp(parseInt(sc.interval, 10) || 10, 5, 999);
+                    starLog(sc, '第 ' + sc.s_round + ' 轮：' + (sc.blind ? '小萤火调整了航向。' : '一颗星升上舞台，将随下一次回复落进故事。'));
+                } else {
+                    sc.s_next_due = sc.s_round + 1;
+                }
+            } else if (plan && plan.for_round === sc.s_round && plan.kind === 'correct' && plan.text) {
+                sc.active = { star_id: null, kind: 'correct', text: plan.text, delivered: 0 };
+                starInject(plan.text);
+                sc.s_next_due = sc.s_round + clamp(parseInt(sc.interval, 10) || 10, 5, 999);
+                starLog(sc, '第 ' + sc.s_round + ' 轮：' + (sc.blind ? '小萤火调整了航向。' : '航向偏了，小萤火轻轻拽了一把。'));
+            } else if (plan && plan.for_round === sc.s_round && plan.kind === 'idle') {
+                sc.s_next_due = sc.s_round + clamp(parseInt(sc.interval, 10) || 10, 5, 999);
+                starLog(sc, '第 ' + sc.s_round + ' 轮：抬头看了，星星还没熟。');
+            } else {
+                // 领航员没来得及/失败：下一轮再看
+                sc.s_next_due = sc.s_round + 1;
+            }
+        }
+        saveStory();
+    }
+
+    function starOnAiMessage() {
+        var sc = starChart();
+        if (!sc || !sc.locked) return;
+        if (sc.active) sc.active.delivered += 1;
+        saveStory();
+        maybePlanStar(sc);
+    }
+
+    function starOnChatChanged() {
+        starClearInjection();
+        var sc = starChart();
+        if (!sc || !sc.locked) return;
+        if (sc.active) {
+            if (sc.active.delivered > 0) {
+                if (sc.active.star_id) {
+                    var s = findStar(sc, sc.active.star_id);
+                    if (s) { s.status = 'lit'; s.lit_round = sc.s_round; }
+                }
+                sc.active = null;
+            } else {
+                starInject(sc.active.text);
+            }
+            saveStory();
+        }
+    }
+
+    /* ---- 领航员：一轮流水线（audit + 行动，同一次调用） ---- */
+
+    var starFlight = null;
+
+    function maybePlanStar(sc, force) {
+        if (!sc.locked) return;
+        var nextRound = sc.s_round + 1;
+        if (!force) {
+            if (sc.active) return;
+            if (nextRound < sc.s_next_due) return;
+            if (sc.planned && sc.planned.for_round === nextRound) return;
+        }
+        if (starFlight) return;
+        var waiting = [];
+        for (var i = 0; i < sc.stars.length; i++) if (sc.stars[i].status === 'waiting') waiting.push(sc.stars[i]);
+        var darks = [];
+        for (var j = 0; j < sc.stars.length; j++) if (sc.stars[j].polarity === 'dark') darks.push(sc.stars[j]);
+        if (!waiting.length && !darks.length) return;   // 图上无事可做
+
+        var recent = recentStoryText(12, 3500);
+        starFlight = callSchedulerApi(starPilotSystemPrompt(), starPilotUserPrompt(sc, recent.text))
+            .then(function (raw) {
+                var fresh = starChart();
+                if (!fresh || !fresh.locked) return;
+                var verdict = parseStarVerdict(raw, fresh);
+                fresh.planned = { for_round: nextRound, kind: verdict.kind, star_id: verdict.star_id || null, text: verdict.text || '' };
+                if (verdict.kind === 'idle') starLog(fresh, '领航员看过了：此刻顺其自然。');
+                else if (verdict.kind === 'correct') starLog(fresh, '领航员备好了一次航向矫正。');
+                else starLog(fresh, sc.blind ? '领航员有了安排。' : '领航员选好了下一颗星。');
+                if (verdict.rejected) starLog(fresh, '⚠ 领航员的一稿被安检拦下（' + verdict.rejected + '），本轮顺其自然。');
+                saveStory();
+                renderPanel();
+            })
+            .catch(function (err) {
+                var fresh = starChart();
+                if (fresh) { fresh.planned = null; saveStory(); }
+                starLog(fresh, '领航员出错（' + (err && err.message || err) + '），下一轮再看。');
+            })
+            .then(function () { starFlight = null; });
+    }
+
+    function starPilotSystemPrompt() {
+        return [
+            '你是一个角色扮演故事的隐形领航员。玩家把愿望折成星星交给你：亮星是想去的方向，暗星是绝不可踏入的禁区。',
+            '每次被唤醒，你做两件事：',
+            '一、验航向：对照近期剧情与星图，判断故事是否正撞向某颗暗星，或偏离亮星太远。',
+            '二、行动，三选一：',
+            '  · 撞暗星或严重偏航 → 矫正：设计一件"世界里发生的事"把故事轻轻拽回来。',
+            '  · 航向正常且某颗亮星时机成熟 → 点星：把那颗星翻译成一件自然发生的事推进故事。',
+            '  · 无星可点且航向正常 → 空转：什么都不做。空转是合法且常见的答案，不要为了交差硬点星。',
+            '',
+            '事件写法铁律：',
+            '1. 只写"世界里发生的事"——一封信到了、旧人进城、门被敲响；推动作，不推内心，绝不写"你感到想要……"。',
+            '2. 绝对不能出现玩家愿望的原文字句（连续 6 字即违规），必须翻译成森林里自然长出的事件。',
+            '3. 引用文字一律用中文引号「」，禁用英文双引号。不使用 {{ }} 宏。事件 30～240 字。',
+            '',
+            '输出格式（严格）：',
+            '第一行只写三者之一：空转 ／ 矫正 ／ 点星 STARXXX（星的编号）',
+            '若矫正或点星：从第二行开始写事件正文。不要输出任何其他内容。'
+        ].join('\n');
+    }
+
+    function starPilotUserPrompt(sc, recentText) {
+        var lines = ['【星图】'];
+        for (var i = 0; i < sc.stars.length; i++) {
+            var s = sc.stars[i];
+            if (s.status === 'retired') continue;
+            var head = (s.polarity === 'dark' ? '暗星' : '亮星') + ' ' + s.id + '（权重' + s.weight + (s.status === 'lit' ? ' · 已点亮' : '') + '）：';
+            lines.push(head + s.wish);
+        }
+        lines.push('');
+        lines.push('【近期剧情】');
+        lines.push(recentText || '（故事尚未展开）');
+        lines.push('');
+        lines.push('现在裁决：第一行输出 空转／矫正／点星 STARXXX，需要时从第二行写事件正文。已点亮的星不可重复点。');
+        return lines.join('\n');
+    }
+
+    function parseStarVerdict(rawText, sc) {
+        var raw = trim(String(rawText || '').replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/, ''));
+        if (!raw) return { kind: 'idle' };
+        var nl = raw.indexOf('\n');
+        var head = nl >= 0 ? raw.slice(0, nl) : raw;
+        var body = nl >= 0 ? trim(raw.slice(nl + 1)) : '';
+        if (head.indexOf('空转') >= 0) return { kind: 'idle' };
+        var kind = head.indexOf('矫正') >= 0 ? 'correct' : 'advance';
+        var starId = null;
+        if (kind === 'advance') {
+            for (var i = 0; i < sc.stars.length; i++) {
+                if (sc.stars[i].status === 'waiting' && head.indexOf(sc.stars[i].id) >= 0) { starId = sc.stars[i].id; break; }
+            }
+            if (!starId) return { kind: 'idle', rejected: '点星裁决未指明有效的星' };
+        }
+        var vetted = vetStarText(body, sc);
+        if (!vetted.pass) return { kind: 'idle', rejected: vetted.reason };
+        return { kind: kind, star_id: starId, text: vetted.text };
+    }
+
+    /* ---- 星图操作 ---- */
+
+    var STAR_SEQ_KEY = 'star_seq';
+
+    function nextStarId(sc) {
+        var maxN = 0;
+        for (var i = 0; i < sc.stars.length; i++) {
+            var m = String(sc.stars[i].id).match(/^STAR(\d+)$/);
+            if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+        }
+        var n = String(maxN + 1);
+        while (n.length < 3) n = '0' + n;
+        return 'STAR' + n;
+    }
+
+    function addStar(polarity, wish, weight) {
+        var sc = starChart();
+        if (!sc) return toast('请先打开一个聊天', 'warning');
+        story();   // 确保根存在
+        sc = starChart();
+        wish = trim(wish);
+        if (!wish) return toast('愿望还是空的', 'warning');
+        if (wish.length > 120) return toast('单颗星 120 字以内——星星是愿望，不是大纲', 'warning');
+        var counts = starCounts(sc);
+        if (polarity === 'dark' && counts.dark >= STAR_MAX_PER_SIDE) return toast('暗星已满 ' + STAR_MAX_PER_SIDE + ' 颗，先合并或删除', 'warning');
+        if (polarity !== 'dark' && counts.bright >= STAR_MAX_PER_SIDE) return toast('亮星已满 ' + STAR_MAX_PER_SIDE + ' 颗，先合并或删除', 'warning');
+        sc.stars.push({
+            id: nextStarId(sc),
+            polarity: polarity === 'dark' ? 'dark' : 'bright',
+            wish: wish,
+            weight: clamp(parseInt(weight, 10) || 2, 1, 3),
+            status: 'waiting',
+            lit_round: null
+        });
+        starLog(sc, (polarity === 'dark' ? '一颗暗星' : '一颗亮星') + '挂上了星图。');
+        saveStory();
+        renderStarPanel();
+    }
+
+    function removeStar(id) {
+        var sc = starChart();
+        if (!sc) return;
+        for (var i = 0; i < sc.stars.length; i++) {
+            if (sc.stars[i].id === id) {
+                if (sc.active && sc.active.star_id === id) return toast('这颗星正在台上，等它落进故事再删', 'warning');
+                sc.stars.splice(i, 1);
+                break;
+            }
+        }
+        if (sc.planned && sc.planned.star_id === id) sc.planned = null;
+        starLog(sc, '一颗星从图上摘下了。');
+        saveStory();
+        renderStarPanel();
+    }
+
+    function lockStarChart(lock) {
+        var sc = starChart();
+        if (!sc) return toast('请先打开一个聊天', 'warning');
+        if (lock) {
+            if (!sc.stars.length) return toast('星图还是空的——先挂几颗星', 'warning');
+            sc.locked = true;
+            if (!sc.s_round) { sc.s_round = 0; sc.s_next_due = 1; }
+            starLog(sc, '✨ 星图交给小萤火了。你的下一条消息起，它开始抬头看星。');
+            toast('星图已锁定，开始领航', 'success');
+        } else {
+            sc.locked = false;
+            sc.planned = null;
+            if (sc.active && sc.active.delivered === 0) { sc.active = null; starClearInjection(); }
+            starLog(sc, '星图解锁，领航暂停。星星都还在。');
+        }
+        saveStory();
+        renderStarPanel();
+    }
+
+    function starManualLook() {
+        var sc = starChart();
+        if (!sc || !sc.locked) return toast('先锁定星图', 'warning');
+        if (sc.active) return toast('台上还有一程光没落地', 'warning');
+        // 紧急拉绳：把下一轮设为到点，并立刻请领航员裁决
+        sc.s_next_due = sc.s_round + 1;
+        saveStory();
+        starLog(sc, '你拉了拉绳：小萤火立刻抬头看星。');
+        maybePlanStar(sc, true);
+        renderStarPanel();
+        toast('小萤火抬头看星了，裁决将在你下一条消息生效', 'info');
+    }
+
+    function starLog(sc, msg) {
+        log('✨ ' + msg);
+    }
+
     /* ================================================================
      * 9. 启动
      * ================================================================ */
@@ -2394,9 +2872,18 @@
         var ev = c.eventSource;
         var t = c.eventTypes || c.event_types;
         if (!ev || !t) return false;
-        ev.on(t.MESSAGE_SENT, function () { try { onUserMessage(); } catch (e) { log('✗ 运行异常：' + (e && e.message)); } });
-        ev.on(t.MESSAGE_RECEIVED, function () { try { onAiMessage(); } catch (e) { log('✗ 运行异常：' + (e && e.message)); } });
-        ev.on(t.CHAT_CHANGED, function () { try { onChatChanged(); } catch (e) { } });
+        ev.on(t.MESSAGE_SENT, function () {
+            try { onUserMessage(); } catch (e) { log('✗ 运行异常：' + (e && e.message)); }
+            try { starOnUserMessage(); } catch (e) { log('✗ 星灯异常：' + (e && e.message)); }
+        });
+        ev.on(t.MESSAGE_RECEIVED, function () {
+            try { onAiMessage(); } catch (e) { log('✗ 运行异常：' + (e && e.message)); }
+            try { starOnAiMessage(); } catch (e) { log('✗ 星灯异常：' + (e && e.message)); }
+        });
+        ev.on(t.CHAT_CHANGED, function () {
+            try { onChatChanged(); } catch (e) { }
+            try { starOnChatChanged(); } catch (e) { }
+        });
         return true;
     }
 
@@ -2417,6 +2904,7 @@
         }
         bindChatEvents();
         clearInjection();     // 开机先清一次，防止上次会话残留
+        starClearInjection();
         onChatChanged();      // 用现场还原逻辑完成首次装载（内含守卫自检）
         reportGuardOnce();    // 若开机时已有聊天，这里就报了；没有则等首次切换
         console.log('[Luciole ' + VERSION + '] 小萤火已就位。守卫来源：' + (chatToken() ? chatTokenSource : '无'));
