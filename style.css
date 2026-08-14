@@ -194,20 +194,18 @@
 }
 body.reduced-motion .lcl2-firefly { animation: none; }
 
-/* 避风塘停泊态：被收进 dock 时收敛体积与光晕 */
+/* 避风塘停泊态：泊位制服把容器压成 20px 小条（inline !important），
+ * 光点跟着收敛成 12px，光晕收拢，呼吸放慢——小小一颗，安静趴窝。 */
 #extensionHarborDock .lcl2-floater,
 #extensionHarborDock #lcl2_floater[data-harbor-parked="1"] {
-    position: static;
-    width: 34px;
-    height: 34px;
     background: transparent;
 }
 #extensionHarborDock .lcl2-firefly {
-    width: 15px;
-    height: 15px;
+    width: 12px;
+    height: 12px;
     box-shadow:
-        0 0 4px 1px rgba(255, 232, 148, .7),
-        0 0 9px 3px rgba(240, 190, 90, .3);
+        0 0 3px 1px rgba(255, 232, 148, .7),
+        0 0 7px 2px rgba(240, 190, 90, .28);
     animation: lcl2-breathe 4.4s ease-in-out infinite;
 }
 
