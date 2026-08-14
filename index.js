@@ -34,6 +34,7 @@
     var COMPILE_TIMEOUT_MS = 500000;
     var COMPILE_ROUTE_TEST_TIMEOUT_MS = 120000;
     var MAX_STREAM_BYTES = 2097152;
+    var STREAM_UI_THROTTLE_MS = 250;
     var SMART_STAGE_BATCH_SIZE = 5;
     var SMART_STAGE_CELL_LIMIT = 12;
     var UNIFORM_STAGE_BATCH_SIZE = 25;
@@ -382,6 +383,23 @@
         walk(visible, 'actor_visible');
         return errors;
     }
+    /* v1.6.25：流式收包时只丈量新增的那一段。
+       原来每收到一小块都要把已累积的全文重新数一遍字节，
+       上千块 × 数万字 = 平方级开销，手机主线程直接被堵死。
+       最终值与逐块全量丈量完全相同。 */
+    function mergeCumulativeCounted(previous, incoming, previousBytes) {
+        var next = String(incoming == null ? '' : incoming);
+        if (!next) return { value: previous, bytes: previousBytes };
+        if (!previous) return { value: next, bytes: utf8ByteLength(next) };
+        if (next.length >= previous.length && next.indexOf(previous) === 0) {
+            return { value: next, bytes: previousBytes + utf8ByteLength(next.slice(previous.length)) };
+        }
+        if (previous.length >= next.length && previous.indexOf(next) === 0) {
+            return { value: previous, bytes: previousBytes };
+        }
+        return { value: previous + next, bytes: previousBytes + utf8ByteLength(next) };
+    }
+
     function utf8ByteLength(value) {
         var text = String(value == null ? '' : value);
         var bytes = 0;
@@ -1978,6 +1996,7 @@
             }
             var finalText = '';
             var finalReasoning = '';
+            var lastNotifyMs = 0;
 
             function mergeCumulative(previous, incoming) {
                 var next = String(incoming == null ? '' : incoming);
@@ -2016,19 +2035,29 @@
                     if (telemetry.first_event_ms === null) telemetry.first_event_ms = eventElapsed;
                     telemetry.last_event_ms = eventElapsed;
                     var previousBytes = telemetry.received_bytes;
-                    finalText = mergeCumulative(finalText, chunk.text);
-                    finalReasoning = mergeCumulative(finalReasoning, chunk.state && (chunk.state.reasoning || chunk.state.reasoning_content));
-                    telemetry.content_bytes = utf8ByteLength(finalText);
-                    telemetry.reasoning_bytes = utf8ByteLength(finalReasoning);
+                    var mergedText = mergeCumulativeCounted(finalText, chunk.text, telemetry.content_bytes);
+                    finalText = mergedText.value;
+                    telemetry.content_bytes = mergedText.bytes;
+                    var mergedReasoning = mergeCumulativeCounted(finalReasoning, chunk.state && (chunk.state.reasoning || chunk.state.reasoning_content), telemetry.reasoning_bytes);
+                    finalReasoning = mergedReasoning.value;
+                    telemetry.reasoning_bytes = mergedReasoning.bytes;
                     telemetry.received_bytes = telemetry.content_bytes + telemetry.reasoning_bytes;
+                    var isFirstChunk = false;
                     if (telemetry.received_bytes > previousBytes) {
                         telemetry.nonempty_event_count += 1;
                         telemetry.last_nonempty_ms = eventElapsed;
-                        if (telemetry.first_chunk_ms === null) telemetry.first_chunk_ms = eventElapsed;
+                        if (telemetry.first_chunk_ms === null) { telemetry.first_chunk_ms = eventElapsed; isFirstChunk = true; }
                     } else {
                         telemetry.empty_event_count += 1;
                     }
-                    notifyApiTelemetry(options, telemetry);
+                    /* v1.6.25：界面刷新限流。原来每一小块都重拼整份编译报告并写 DOM，
+                       长回包时主线程完全没有空隙，面板会整个卡死点不动。
+                       首块、结束与出错仍然立即上报，进度不会丢。 */
+                    var nowMs = Date.now();
+                    if (isFirstChunk || nowMs - lastNotifyMs >= STREAM_UI_THROTTLE_MS) {
+                        lastNotifyMs = nowMs;
+                        notifyApiTelemetry(options, telemetry);
+                    }
                     if (telemetry.received_bytes > MAX_STREAM_BYTES) {
                         var tooLarge = new Error('酒馆连接配置流式回包超过 2MB 安全上限');
                         tooLarge.code = 'LUCIOLE_STREAM_TOO_LARGE';
