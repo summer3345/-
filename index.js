@@ -28,7 +28,7 @@
 
     /* 面板上显示的版本号。改版本时这里和 manifest.json 一起改——
      * 界面上看得见版本，才能一眼确认新文件到底装上没有。 */
-    var VERSION = '2.5.3';
+    var VERSION = '2.6.1';
 
     var EXT_NAME = 'luciole_v2';
     var INJECT_KEY = 'luciole_v2_clue';
@@ -144,6 +144,7 @@
             depth: 1,              // setExtensionPrompt 注入深度
             batch_size: DEFAULT_BATCH,
             show_floater: true,    // 萤火虫浮标（可停进避风塘）
+            theme: 'night',        // night = 夜·萤火林 / day = 昼·呀哈哈林
             api2: { url: '', key: '', model: '' },  // 调度员连接（智能调度用；留空复用编译连接）
             ctx_strip: 'thinking, think, cot, reasoning, thought, plan, 思考, 思维链',  // 读上下文时剔除的标签块
             ctx_prefer: ''          // 若填写：楼层中含任一此类标签块时，只取块内文本（如 正文, summary）
@@ -1366,7 +1367,7 @@
             st.clock.next_due = 1;   // 点亮后的第一条玩家消息即是第一次机会（宪法 5.4）
         }
         saveStory();
-        log('🕯 故事点亮。你的下一次行动，就是第一束光的机会。');
+        log('🪇 故事点亮。你的下一次行动，就是第一束光的机会。');
         toast('小萤火已点亮', 'success');
         renderPanel();
     }
@@ -1620,7 +1621,7 @@
             var canDispatch = !clue.used && st.status === 'lit' && !st.clock.active_id && st.config.run_mode !== 'supervise';
             html += '<div class="lcl2-clue" data-id="' + esc(clue.id) + '">'
                 + '<div class="lcl2-clue-head">#' + (j + 1) + ' ' + badge
-                + (canDispatch ? '<span class="lcl2-clue-fire" title="立即投放这条">🕯 投</span>' : '')
+                + (canDispatch ? '<span class="lcl2-clue-fire" title="立即投放这条">🪇 投</span>' : '')
                 + '<span class="lcl2-clue-del" title="删除这条">✕</span></div>'
                 + '<textarea class="lcl2-clue-text text_pole" rows="2">' + esc(clue.text) + '</textarea>'
                 + '</div>';
@@ -1710,8 +1711,9 @@
         return '' +
         '<div id="' + PANEL_ID + '" class="lcl2-panel" style="display:none">' +
         '  <div class="lcl2-head">' +
-        '    <b>🕯 小萤火 · 帷幕沙漏</b>' +
+        '    <b>🪇 小萤火 · 帷幕沙漏</b>' +
         '    <span class="lcl2-head-ver">' + VERSION + '</span>' +
+        '    <span id="lcl2_theme" class="lcl2-theme-toggle" title="切换日夜"></span>' +
         '    <span id="lcl2_close" class="lcl2-close" title="关闭">✕</span>' +
         '  </div>' +
         '  <div class="lcl2-body">' +
@@ -1761,7 +1763,7 @@
 
         '      <details class="lcl2-sec" open><summary>③ 点亮</summary>' +
         '        <div class="lcl2-row">' +
-        '          <button id="lcl2_btn_light" class="menu_button">🕯 点亮</button>' +
+        '          <button id="lcl2_btn_light" class="menu_button">🪇 点亮</button>' +
         '          <button id="lcl2_btn_off" class="menu_button">熄灭</button>' +
         '          <button id="lcl2_btn_rewind" class="menu_button" title="删过楼可以用这个校正轮数">回拨一轮</button>' +
         '          <button id="lcl2_btn_conclude" class="menu_button" title="剧情走到头了就收——没发完的线索安静退场">完结</button>' +
@@ -1821,12 +1823,29 @@
         '      </details>' +
 
         '      <div class="lcl2-footer">' +
-        '        <span class="lcl2-footer-fly">🕯</span>' +
-        '        <span>小萤火由三双手点亮 —— 江 · 波哥 Claude · 猫g GPT</span>' +
+        '        <span class="lcl2-footer-fly">🪇</span>' +
+        '        <span>小萤火由四双手点亮 —— 江 · 波哥 Claude · 五哥 Claude · 猫g GPT</span>' +
         '      </div>' +
 
         '  </div>' +
         '</div>';
+    }
+
+    /* 日夜配色：面板与浮标各挂一个 class，CSS 变量整套跟着换。
+     * 浮标飘在聊天区（那边是酒馆自己的主题），所以它两版都保持黄绿，
+     * 只是昼间芯子更暖一点——不会在暗底上消失。 */
+    function applyTheme() {
+        var day = settings().theme === 'day';
+        $('#' + PANEL_ID).toggleClass('lcl2-day', day).toggleClass('lcl2-night', !day);
+        $('#lcl2_floater').toggleClass('lcl2-day', day).toggleClass('lcl2-night', !day);
+        $('#lcl2_theme').text(day ? '☀️' : '🌙').attr('title', day ? '现在是昼·呀哈哈林，点一下入夜' : '现在是夜·萤火林，点一下天亮');
+    }
+
+    function toggleTheme() {
+        var s = settings();
+        s.theme = (s.theme === 'day') ? 'night' : 'day';
+        saveSettings();
+        applyTheme();
     }
 
     function showPanel() { $('#' + PANEL_ID).show(); renderPanel(); }
@@ -1840,6 +1859,7 @@
         var $root = $('#' + PANEL_ID);
 
         $root.on('click', '#lcl2_close', hidePanel);
+        $root.on('click', '#lcl2_theme', toggleTheme);
 
         $root.on('change input', '#lcl2_secret, #lcl2_banned, #lcl2_total, #lcl2_interval, #lcl2_count, #lcl2_intensity, #lcl2_author', function () {
             readFormIntoStory();
@@ -2000,6 +2020,7 @@
         makeFloater();
         makeSettingsEntry();
         makeWandEntry();
+        applyTheme();
         renderPanel();
         return true;
     }
@@ -2040,7 +2061,7 @@
         if (!$host.length) return;
         $host.append(
             '<div id="lcl2_drawer" class="inline-drawer">' +
-            '  <div class="inline-drawer-toggle inline-drawer-header"><b>🕯 小萤火 ' + VERSION + '</b>' +
+            '  <div class="inline-drawer-toggle inline-drawer-header"><b>🪇 小萤火 ' + VERSION + '</b>' +
             '    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>' +
             '  <div class="inline-drawer-content"><div class="lcl2-drawer-inner">' +
             '    <button id="lcl2_open_panel" class="menu_button">打开小萤火面板</button>' +
