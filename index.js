@@ -28,7 +28,7 @@
 
     /* 面板上显示的版本号。改版本时这里和 manifest.json 一起改——
      * 界面上看得见版本，才能一眼确认新文件到底装上没有。 */
-    var VERSION = '2.8.2';
+    var VERSION = '2.8.3';
 
     var EXT_NAME = 'luciole_v2';
     var INJECT_KEY = 'luciole_v2_clue';
@@ -1733,6 +1733,7 @@
         renderPromptDrawer();
         renderLog();
         renderButtons();
+        renderStarPanel();
     }
 
     function fillIfIdle(sel, value) {
@@ -2100,6 +2101,28 @@
         '        <label class="lcl2-check"><input type="checkbox" id="lcl2_preset_pin"> 本故事固定用这套（不勾就跟随上面的全局选择）</label>' +
         '        <div id="lcl2_preset_note" class="lcl2-dim"></div>' +
         '        <div id="lcl2_prompt_slots"></div>' +
+        '      </details>' +
+
+        '      <details id="lcl2_star_sec" class="lcl2-sec"><summary>✨ 星星点灯（第二幕 · 愿望领航）</summary>' +
+        '        <div class="lcl2-star-status lcl2-dim"></div>' +
+        '        <div class="lcl2-star-add">' +
+        '          <textarea id="lcl2_star_wish" class="text_pole" rows="2" maxlength="120" placeholder="把愿望折成星星（120字内）。亮星=想去的方向：例「我想和他慢慢经历一场双向暗恋」；暗星=禁区：例「不要出现车祸失忆」"></textarea>' +
+        '          <div class="lcl2-row">' +
+        '            <select id="lcl2_star_pol" class="text_pole lcl2-star-sel"><option value="bright">🌟 亮星 · 想要</option><option value="dark">🌑 暗星 · 禁区</option></select>' +
+        '            <select id="lcl2_star_w" class="text_pole lcl2-star-sel"><option value="1">在意 ●</option><option value="2" selected>在意 ●●</option><option value="3">在意 ●●●</option></select>' +
+        '            <button id="lcl2_star_addbtn" class="menu_button">挂上星图</button>' +
+        '          </div>' +
+        '        </div>' +
+        '        <div id="lcl2_star_list"></div>' +
+        '        <div class="lcl2-grid" style="margin-top:8px">' +
+        '          <div><label class="lcl2-label">每隔几轮抬头一次（≥5）</label><input id="lcl2_star_interval" class="text_pole" type="number" min="5" max="999"></div>' +
+        '          <div style="display:flex;align-items:flex-end"><label class="checkbox_label"><input id="lcl2_star_blind" type="checkbox"><span>盲档（不告知哪轮点了星，完结后复盘解封）</span></label></div>' +
+        '        </div>' +
+        '        <div class="lcl2-row">' +
+        '          <button id="lcl2_star_lock" class="menu_button">✨ 交给小萤火</button>' +
+        '          <button id="lcl2_star_look" class="menu_button">抬头看星</button>' +
+        '          <button id="lcl2_star_reveal" class="menu_button" style="display:none">🌠 复盘星图</button>' +
+        '        </div>' +
         '      </details>' +
 
         '      <details class="lcl2-sec"><summary>⑥ 日志</summary>' +
