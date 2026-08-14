@@ -35,6 +35,40 @@
 
     function ctx() { return SillyTavern.getContext(); }
 
+    /* 聊天身份令牌：用于跨异步边界确认"还是刚才那个聊天"。
+     * 依次尝试三种来源，全都拿不到就返回空串——空串 = 守卫自动失效，
+     * 行为与打补丁前完全一致，绝不会因为取不到 id 就误杀编译。 */
+    var chatTokenSource = '';
+    function chatToken() {
+        var c;
+        try { c = ctx(); } catch (e) { return ''; }
+        try {
+            if (typeof c.getCurrentChatId === 'function') {
+                var v = c.getCurrentChatId();
+                if (v !== null && v !== undefined && v !== '') { chatTokenSource = 'getCurrentChatId'; return String(v); }
+            }
+        } catch (e) { }
+        try {
+            if (c.chatId !== null && c.chatId !== undefined && c.chatId !== '') { chatTokenSource = 'chatId'; return String(c.chatId); }
+        } catch (e) { }
+        try {
+            var ch = (c.characterId === null || c.characterId === undefined) ? '' : c.characterId;
+            var gr = (c.groupId === null || c.groupId === undefined) ? '' : c.groupId;
+            if (ch !== '' || gr !== '') { chatTokenSource = 'character/group'; return 'ch:' + ch + '|gr:' + gr; }
+        } catch (e) { }
+        chatTokenSource = '';
+        return '';
+    }
+
+    /* 守卫判据：只有"两头都拿得到令牌、且不一样"才算换了聊天。
+     * 任何一头是空串都放行——宁可守卫失灵，不可误杀。 */
+    function chatChangedSince(token) {
+        if (!token) return false;
+        var now = chatToken();
+        if (!now) return false;
+        return now !== token;
+    }
+
     function trim(v) { return String(v == null ? '' : v).replace(/^\s+|\s+$/g, ''); }
     function isArray(v) { return Object.prototype.toString.call(v) === '[object Array]'; }
     function isObject(v) { return !!v && typeof v === 'object' && !isArray(v); }
@@ -770,14 +804,21 @@
         setCompileUi(true, '准备取材……');
 
         var materials = { card: '', world: '', story: '', missed: [] };
+        var homeToken = chatToken();   // 编译全程锁定这个聊天
+
+        function assertHome() {
+            if (chatChangedSince(homeToken)) throw new Error('编译期间切换了聊天，本次作废（已保住的草稿留在原聊天里，回去再点编译即可续跑）。');
+        }
 
         return Promise.resolve().then(function () {
+            assertHome();
             materials.card = characterCardText(4000);
             var recent = recentStoryText(40, 8000);
             materials.story = recent.text;
             materials.story_count = recent.count;
             return readCharacterWorldBooks(6000);
         }).then(function (wb) {
+            assertHome();
             materials.world = wb.text;
             materials.missed = wb.missed;
             var picked = ['角色卡'];
@@ -788,6 +829,7 @@
             for (var m = 0; m < wb.missed.length; m++) log('⚠ ' + wb.missed[m]);
             return runBatches();
         }).then(function () {
+            assertHome();
             st.clues = doneClues.map(function (text) {
                 return { id: uid('clue'), text: text, used: false, delivered_count: 0 };
             });
@@ -803,25 +845,34 @@
         }).catch(function (err) {
             compileState.running = false;
             setCompileUi(false, '');
+            var msg = (err && err.message) || String(err);
+            // 人已经不在原聊天了：只弹提示，绝不把日志写进别人的账本
+            if (chatChangedSince(homeToken)) {
+                toast('编译已中断：' + msg, 'error');
+                renderPanel();
+                throw err;
+            }
             // 保草稿：已定稿部分不丢
             if (doneClues.length) {
                 st.draft = { clues: doneClues, secret_hash: simpleHash(st.hidden_secret) };
                 saveStory();
                 log('编译中断，已保住 ' + doneClues.length + ' 条草稿。修好问题后再点编译即可续跑。');
             }
-            log('✗ 编译失败：' + (err && err.message || err));
-            toast('编译失败：' + (err && err.message || err), 'error');
+            log('✗ 编译失败：' + msg);
+            toast('编译失败：' + msg, 'error');
             renderPanel();
             throw err;
         });
 
         function runBatches() {
             if (compileState.cancel) throw new Error('已手动停止。');
+            assertHome();
             if (doneClues.length >= target) return Promise.resolve();
             var need = Math.min(batchSize, target - doneClues.length);
             var batchNo = Math.floor(doneClues.length / batchSize) + 1;
             setCompileUi(true, '正在生成第 ' + (doneClues.length + 1) + '～' + (doneClues.length + need) + ' 条（共 ' + target + ' 条）……');
             return callBatchWithRetry(need, 2).then(function (accepted) {
+                assertHome();
                 for (var i = 0; i < accepted.length && doneClues.length < target; i++) doneClues.push(accepted[i]);
                 // 每批落草稿，随时断随时续
                 st.draft = { clues: doneClues.slice(), secret_hash: simpleHash(st.hidden_secret) };
@@ -847,7 +898,7 @@
                 if (!vetted.pass.length) throw new Error('本批线索全部被安检拦下。');
                 return vetted.pass;
             }).catch(function (err) {
-                if (retriesLeft > 0 && !compileState.cancel) {
+                if (retriesLeft > 0 && !compileState.cancel && !chatChangedSince(homeToken)) {
                     log('本批出错（' + (err && err.message || err) + '），重试一次……');
                     return callBatchWithRetry(need, retriesLeft - 1);
                 }
@@ -907,7 +958,10 @@
                 var chosen = findClue(st, plan.clue_id);
                 if (chosen && !chosen.used) return { clue: chosen, via: '调度员选牌' };
             }
-            return { clue: pool[0], via: plan === null ? '调度未及完成，按顺序发牌' : '顺序发牌' };
+            var why = '顺序发牌';
+            if (!plan) why = '调度未及完成，按顺序发牌';
+            else if (plan.failed) why = '调度没成，按顺序发牌';
+            return { clue: pool[0], via: why };
         }
         return { clue: pool[0], via: '' };
     }
@@ -983,8 +1037,15 @@
         if (st.config.run_mode !== 'supervise' && !st.clock.active_id && !unusedClues(st).length && st.status !== 'finished') {
             st.status = 'finished';
             clearInjection();
-            log('所有线索都已送完。故事的真相，现在交给你们自己走完。');
-            toast('小萤火的线索已全部送完', 'success');
+            var dropped = 0;
+            for (var di = 0; di < st.clues.length; di++) if (st.clues[di].dropped) dropped++;
+            if (dropped) {
+                log('线索池见底了：实际送出 ' + st.clock.cursor + ' 条，另有 ' + dropped + ' 条被剧情越过、安静退场。故事的真相，现在交给你们自己走完。');
+                toast('小萤火的线索已用尽（送出 ' + st.clock.cursor + ' 条）', 'success');
+            } else {
+                log('所有线索都已送完。故事的真相，现在交给你们自己走完。');
+                toast('小萤火的线索已全部送完', 'success');
+            }
         }
         saveStory();
         renderPanel();
@@ -1043,8 +1104,10 @@
         var nextRound = st.clock.round + 1;
         if (st.clock.active_id) return;                       // 台上还有人，下一轮不投
         if (nextRound < st.clock.next_due) return;            // 下一轮不到点
-        if (st.clock.planned && st.clock.planned.for_round === nextRound) return;  // 已规划
+        if (st.clock.planned && st.clock.planned.for_round === nextRound) return;  // 已规划（含已失败：本轮不再重试）
         if (planFlight) return;
+
+        var homeToken = chatToken();   // 起飞时记下是哪个聊天，落地必须对得上
 
         if (mode === 'smart') {
             var pool = unusedClues(st);
@@ -1053,6 +1116,7 @@
             var recent = recentStoryText(10, 3000);
             planFlight = callSchedulerApi(schedulerSystemPrompt(), schedulerUserPrompt(recent.text, window_))
                 .then(function (raw) {
+                    if (chatChangedSince(homeToken)) return;  // 人已经走了：这份结果作废，绝不写进别的聊天
                     var picked = matchClueIdInText(raw, window_);
                     var fresh = story();
                     if (!fresh || fresh.config.run_mode !== 'smart' || fresh.status !== 'lit') return;
@@ -1066,14 +1130,16 @@
                         fresh.clock.planned = { for_round: nextRound, clue_id: picked.id };
                         log('调度员已为下一次机会选牌。');
                     } else {
-                        fresh.clock.planned = null;
+                        fresh.clock.planned = { for_round: nextRound, failed: true };
                         log('调度员回话看不懂，届时按顺序发牌兜底。');
                     }
                     saveStory();
                 })
                 .catch(function (err) {
+                    if (chatChangedSince(homeToken)) return;
                     var fresh = story();
-                    if (fresh) { fresh.clock.planned = null; saveStory(); }
+                    // 记为"本轮已试过"，避免玩家每重抽一次就重新调度一次、白烧额度
+                    if (fresh) { fresh.clock.planned = { for_round: nextRound, failed: true }; saveStory(); }
                     log('调度员出错（' + (err && err.message || err) + '），届时按顺序发牌兜底。');
                 })
                 .then(function () { planFlight = null; });
@@ -1086,6 +1152,8 @@
         for (var g = Math.max(0, st.clues.length - 5); g < st.clues.length; g++) given.push(st.clues[g].text);
         planFlight = callSchedulerApi(godSystemPrompt(st), godUserPrompt(st, recent2.text, given))
             .then(function (raw) {
+                // 最要紧的一道：God 读的是这个聊天的秘密，落地时人若已走，整份作废。
+                if (chatChangedSince(homeToken)) return;
                 var fresh = story();
                 if (!fresh || fresh.config.run_mode !== 'supervise' || fresh.status !== 'lit') return;
                 var verdict = parseGodVerdict(raw, fresh);
@@ -1102,8 +1170,9 @@
                 saveStory();
             })
             .catch(function (err) {
+                if (chatChangedSince(homeToken)) return;
                 var fresh = story();
-                if (fresh) { fresh.clock.planned = null; saveStory(); }
+                if (fresh) { fresh.clock.planned = { for_round: nextRound, failed: true }; saveStory(); }
                 log('God 出错（' + (err && err.message || err) + '），届时本轮不投。');
             })
             .then(function () { planFlight = null; });
@@ -1507,9 +1576,14 @@
         $('#lcl2_btn_rewind').prop('disabled', !lit);
     }
 
-    function renderClueList() {
+    function renderClueList(force) {
         var $list = $('#lcl2_clues');
         if (!$list.length) return;
+        /* 用户正在某条线索里打字时绝不重建列表——
+         * innerHTML 重写会连光标带内容一起抹掉（iOS WebView 尤其致命）。
+         * 与 fillIfIdle 同一套纪律：有焦点就让位，等失焦后的下一次渲染再补。 */
+        if (!force && $list.find('textarea:focus').length) { clueListDirty = true; return; }
+        clueListDirty = false;
         var st = story();
         if (!st || !st.clues.length) { $list.html('<div class="lcl2-dim">（还没有编译好的线索）</div>'); return; }
         if (!st.config.author_mode) {
@@ -1535,6 +1609,8 @@
         }
         $list.html(html);
     }
+
+    var clueListDirty = false;   // 因用户正在打字而跳过的重建，失焦后补上
 
     var logRenderTimer = null;
     function renderLogSoon() {
@@ -1868,6 +1944,12 @@
             if (st.clock.active_id === id && st.status === 'lit') injectText(newText);
             saveStory();
         });
+        // 打字期间被推迟的重建，在失焦后补上（此时抹掉输入框已无害）
+        $root.on('blur', '.lcl2-clue-text', function () {
+            setTimeout(function () {
+                if (clueListDirty && !$('#lcl2_clues').find('textarea:focus').length) renderClueList(true);
+            }, 0);
+        });
         $root.on('click', '.lcl2-clue-fire', function () {
             var id = $(this).closest('.lcl2-clue').data('id');
             manualDispatch(id);
@@ -1995,7 +2077,11 @@
         bindChatEvents();
         clearInjection();     // 开机先清一次，防止上次会话残留
         onChatChanged();      // 用现场还原逻辑完成首次装载
-        console.log('[Luciole 2.0] 小萤火已就位。');
+        // 串场守卫自检：写进人话日志，手机上不用开控制台也能确认
+        var tk = chatToken();
+        if (tk) log('🛡 串场守卫已启用（聊天身份来源：' + chatTokenSource + '）。');
+        else log('⚠ 串场守卫未启用：这个酒馆版本取不到聊天身份。行为与旧版一致，但编译中途切聊天可能丢结果——请尽量等编译完再切。');
+        console.log('[Luciole 2.0] 小萤火已就位。守卫来源：' + (chatTokenSource || '无'));
     }
 
     if (document.readyState === 'loading') {
