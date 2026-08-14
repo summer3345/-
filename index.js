@@ -1992,7 +1992,7 @@
 
         '      <div class="lcl2-mode-row">' +
         '        <button class="lcl2-mode lcl2-mode-on">⏳ 帷幕沙漏<small>第一幕 · 进行中</small></button>' +
-        '        <button class="lcl2-mode" disabled title="第二幕，敬请期待">✨ 星星点灯<small>第二幕 · 敬请期待</small></button>' +
+        '        <button id="lcl2_mode_star" class="lcl2-mode">✨ 星星点灯<small>第二幕 · 已点亮</small></button>' +
         '        <button class="lcl2-mode" disabled title="第三幕，敬请期待">🌫 迷雾森林<small>第三幕 · 敬请期待</small></button>' +
         '      </div>' +
 
@@ -2238,6 +2238,13 @@
         $root.on('click', '#lcl2_btn_manual', function () { manualDispatch(null); });
 
         // ✨ 星星点灯
+        $root.on('click', '#lcl2_mode_star', function () {
+            var sec = document.getElementById('lcl2_star_sec');
+            if (!sec) return;
+            sec.open = true;
+            renderStarPanel();
+            try { sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { sec.scrollIntoView(); }
+        });
         $root.on('click', '#lcl2_star_addbtn', function () {
             story();
             addStar(String($('#lcl2_star_pol').val()), String($('#lcl2_star_wish').val()), $('#lcl2_star_w').val());
