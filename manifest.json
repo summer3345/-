@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "GPT × Claude × ripple",
-    "version": "1.6.25",
+    "version": "1.6.26",
     "minimum_client_version": "1.14.0",
     "homePage": ""
 }

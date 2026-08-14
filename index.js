@@ -629,7 +629,9 @@
             if (entries[i].id !== token.id || entries[i].state !== 'pending') continue;
             entries[i].summary = sanitizeDiagnosticText(summary || entries[i].summary, 500);
             entries[i].detail = sanitizeDiagnosticText(detail || entries[i].detail, 1200);
-            save(); renderDiagnostics();
+            /* v1.6.26：进行中的进度条目不落盘。流式期间这里每 250 毫秒就被叫一次，
+               每次都写一遍设置在手机上是实打实的负担；结束时 finishDiagnostic 会正常保存。 */
+            renderDiagnostics();
             return;
         }
     }
@@ -658,7 +660,7 @@
         if (entry.model) routeBits.push(entry.model);
         if (entry.elapsed_ms !== null) routeBits.push((entry.elapsed_ms / 1000).toFixed(1) + ' 秒');
         var detail = (entry.detail || entry.endpoint) ?
-            '<details class="xyh-diag-detail"><summary>查看技术详情</summary>' +
+            '<details class="xyh-diag-detail" data-diag-id="' + esc(entry.id) + '"><summary>查看技术详情</summary>' +
             (entry.endpoint ? '<div><b>目标：</b>' + esc(entry.endpoint) + '</div>' : '') +
             (entry.detail ? '<pre>' + esc(entry.detail) + '</pre>' : '') + '</details>' : '';
         return '<div class="xyh-diag-entry xyh-diag-' + esc(entry.state) + '">' +
@@ -668,10 +670,31 @@
             '<p>' + esc(entry.summary || '没有补充说明。') + '</p>' + detail + '</div>';
     }
 
+    /* v1.6.26：报错台重绘会整块换掉 innerHTML，展开的「查看技术详情」因此被
+       连根拔掉重建，在流式期间表现为「刚点开就秒合上」。这里在重绘前记下哪些
+       是展开的，重绘后按 id 原样恢复。 */
+    function openDiagnosticDetailIds() {
+        var open = {};
+        $('#xyh_diagnostics details.xyh-diag-detail[open]').each(function () {
+            var id = this.getAttribute('data-diag-id');
+            if (id) open[id] = true;
+        });
+        return open;
+    }
+
+    function restoreDiagnosticDetails(open) {
+        if (!open) return;
+        $('#xyh_diagnostics details.xyh-diag-detail').each(function () {
+            var id = this.getAttribute('data-diag-id');
+            if (id && open[id]) this.setAttribute('open', 'open');
+        });
+    }
+
     function renderDiagnostics() {
         var latest = $('#xyh_diag_latest');
         var history = $('#xyh_diag_history');
         if (!latest.length || !history.length) return;
+        var openBefore = openDiagnosticDetailIds();
         var entries = settings().diagnostics.entries;
         if (!entries.length) {
             latest.html('<div class="xyh-diag-empty">还没有测试或报错记录。连接结果会一直留在这里，直到手动清空。</div>');
@@ -684,6 +707,7 @@
         for (var i = 1; i < entries.length; i++) html += diagnosticEntryHtml(entries[i]);
         history.html(html);
         $('#xyh_diag_history_wrap').toggle(entries.length > 1);
+        restoreDiagnosticDetails(openBefore);
     }
 
     function focusDiagnostics() {
@@ -1966,6 +1990,8 @@
         notifyApiTelemetry(options, telemetry);
         var controller = typeof AbortController === 'function' ? new AbortController() : null;
         var generator = null;
+        /* v1.6.26：累积器提到请求级作用域，出错路径也能读到已经收到的思考内容。 */
+        var streamState = { text: '', reasoning: '' };
         var request;
         try {
             request = service.sendRequest(String(profile.id), messages, maxTokens || 1800, {
@@ -1994,8 +2020,6 @@
                 invalidStream.code = 'LUCIOLE_ST_STREAM_UNAVAILABLE';
                 throw invalidStream;
             }
-            var finalText = '';
-            var finalReasoning = '';
             var lastNotifyMs = 0;
 
             function mergeCumulative(previous, incoming) {
@@ -2011,23 +2035,23 @@
                     if (step && step.done) {
                         telemetry.saw_done = true;
                         telemetry.completed_ms = Date.now() - telemetry.started_ms;
-                        telemetry.content_bytes = utf8ByteLength(finalText);
-                        telemetry.reasoning_bytes = utf8ByteLength(finalReasoning);
+                        telemetry.content_bytes = utf8ByteLength(streamState.text);
+                        telemetry.reasoning_bytes = utf8ByteLength(streamState.reasoning);
                         telemetry.received_bytes = telemetry.content_bytes + telemetry.reasoning_bytes;
                         notifyApiTelemetry(options, telemetry);
-                        if (!trim(finalText)) {
-                            var recovered = options && options.allowReasoningJson ? recoverCompleteJsonObject(finalReasoning) : '';
+                        if (!trim(streamState.text)) {
+                            var recovered = options && options.allowReasoningJson ? recoverCompleteJsonObject(streamState.reasoning) : '';
                             if (recovered) {
                                 telemetry.reasoning_json_recovered = true;
                                 telemetry.content_bytes = utf8ByteLength(recovered);
                                 notifyApiTelemetry(options, telemetry);
                                 return recovered;
                             }
-                            var empty = new Error(finalReasoning ? '酒馆连接配置只返回了思考过程，没有返回正文内容' : '酒馆连接配置流式结束，但没有返回正文内容');
-                            empty.code = finalReasoning ? 'LUCIOLE_REASONING_ONLY' : 'LUCIOLE_EMPTY_CONTENT';
+                            var empty = new Error(streamState.reasoning ? '酒馆连接配置只返回了思考过程，没有返回正文内容' : '酒馆连接配置流式结束，但没有返回正文内容');
+                            empty.code = streamState.reasoning ? 'LUCIOLE_REASONING_ONLY' : 'LUCIOLE_EMPTY_CONTENT';
                             throw empty;
                         }
-                        return finalText;
+                        return streamState.text;
                     }
                     telemetry.event_count += 1;
                     var chunk = step && step.value || {};
@@ -2035,11 +2059,11 @@
                     if (telemetry.first_event_ms === null) telemetry.first_event_ms = eventElapsed;
                     telemetry.last_event_ms = eventElapsed;
                     var previousBytes = telemetry.received_bytes;
-                    var mergedText = mergeCumulativeCounted(finalText, chunk.text, telemetry.content_bytes);
-                    finalText = mergedText.value;
+                    var mergedText = mergeCumulativeCounted(streamState.text, chunk.text, telemetry.content_bytes);
+                    streamState.text = mergedText.value;
                     telemetry.content_bytes = mergedText.bytes;
-                    var mergedReasoning = mergeCumulativeCounted(finalReasoning, chunk.state && (chunk.state.reasoning || chunk.state.reasoning_content), telemetry.reasoning_bytes);
-                    finalReasoning = mergedReasoning.value;
+                    var mergedReasoning = mergeCumulativeCounted(streamState.reasoning, chunk.state && (chunk.state.reasoning || chunk.state.reasoning_content), telemetry.reasoning_bytes);
+                    streamState.reasoning = mergedReasoning.value;
                     telemetry.reasoning_bytes = mergedReasoning.bytes;
                     telemetry.received_bytes = telemetry.content_bytes + telemetry.reasoning_bytes;
                     var isFirstChunk = false;
@@ -2078,6 +2102,20 @@
 
         return withTimeout(request, timeoutMs, stopStream, options.scope).catch(function (error) {
             telemetry.failed_ms = Date.now() - telemetry.started_ms;
+            /* v1.6.26：断线救援。原来只有「流正常结束」这一条路会去思考内容里捞 JSON；
+               推理型模型把整份答案写在思考通道、正文 0 字节、然后连接被上游掐断时，
+               已经收到的思考内容会被整个丢掉。这里在出错路径上也试一次同样的救援：
+               捞得到完整 JSON 就当本步成功，捞不到才按原样报错。 */
+            if (options && options.allowReasoningJson && !trim(streamState.text) && trim(streamState.reasoning)) {
+                var rescued = recoverCompleteJsonObject(streamState.reasoning);
+                if (rescued) {
+                    telemetry.reasoning_json_recovered = true;
+                    telemetry.stream_interrupted = true;
+                    telemetry.content_bytes = utf8ByteLength(rescued);
+                    notifyApiTelemetry(options, telemetry);
+                    return rescued;
+                }
+            }
             notifyApiTelemetry(options, telemetry);
             var normalized = error && /^LUCIOLE_/.test(String(error.code || '')) ? error : connectionManagerRequestError(error);
             throw decorateApiError(normalized, options, telemetry);
