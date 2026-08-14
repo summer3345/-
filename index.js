@@ -2801,10 +2801,88 @@
         draft.conditions = draft.conditions.concat(additions);
     }
 
+    /* ---------------- v1.7.0 安检三档化：指纹质检与泄漏隔离 ----------------
+       原则：凡是插件自己能判定的，插件判定；只有真越界才硬拦。
+       这两道过去都会让整个故事锁不了，现在一道在源头清污、一道就地隔离。 */
+
+    var META_FINGERPRINT_TERMS = ['统一编译输出', '编译输出', '编译台', '智能调度', '均匀序列',
+        '真相命题', '因果结构', '安全外壳', '候选线索', '本地修正', '小萤火', 'luciole',
+        'source_secret', 'char_summary', 'user_persona', 'world_note', 'environment_palette',
+        'staged_clue_batch', 'staged_structure', 'staged_safe_shell', 'claim_source_origin'];
+
+    function publicFingerprintCorpus(d) {
+        var parts = [String(d.initial_public_version || ''), String(d.initial_public_anchor || '')];
+        for (var i = 0; i < (d.public_atoms || []).length; i++) {
+            var atom = d.public_atoms[i];
+            if (typeof atom === 'string') parts.push(atom);
+            else if (isObject(atom)) parts.push(String(atom.text || atom.surface || ''));
+        }
+        return parts.join('\n');
+    }
+
+    /* 指纹是「秘密的识别串」。一个已经写在公开层里的词组，按定义不可能是秘密；
+       编译流程自己的术语更不可能。把这类词留在指纹表里，只会让安检冤枉正常线索。 */
+    function unusableFingerprintReason(value, publicCorpus) {
+        var text = trim(String(value || ''));
+        if (!text) return '为空';
+        if (text.length < 2) return '过短，几乎必然误伤';
+        var lower = text.toLowerCase();
+        for (var i = 0; i < META_FINGERPRINT_TERMS.length; i++) {
+            if (lower.indexOf(META_FINGERPRINT_TERMS[i].toLowerCase()) >= 0) return '是编译流程的内部术语，不是故事秘密';
+        }
+        if (publicCorpus && containsCI(publicCorpus, text)) return '已经写在公开层里，按定义不是秘密';
+        return '';
+    }
+
+    function scrubClaimFingerprints(d, notes) {
+        var corpus = publicFingerprintCorpus(d);
+        for (var i = 0; i < d.claims.length; i++) {
+            var claim = d.claims[i];
+            var kept = [];
+            for (var f = 0; f < claim.fingerprints.length; f++) {
+                var reason = unusableFingerprintReason(claim.fingerprints[f], corpus);
+                if (reason) {
+                    localRepairNote(notes, claim.claim_id, '指纹「' + claim.fingerprints[f] + '」' + reason + '，已从秘密指纹表移除');
+                    continue;
+                }
+                kept.push(claim.fingerprints[f]);
+            }
+            claim.fingerprints = kept;
+        }
+    }
+
+    /* 真的踩到秘密指纹时，撤下那一条变体即可——删除只会更紧，绝不会让秘密漏出去。
+       没必要因为十条里有一条写歪，就让整个故事锁不了。 */
+    function isolateLeakingVariants(d, notes) {
+        var survivors = [];
+        for (var c = 0; c < d.clues.length; c++) {
+            var clue = d.clues[c];
+            var keptVariants = [];
+            for (var v = 0; v < clue.safe_variants.length; v++) {
+                var variant = clue.safe_variants[v];
+                var hits = scanUnlicensed(String(variant.surface || '') + '\n' + String(variant.anchor_text || ''), d.claims, clue.allowed_claim_ids);
+                if (hits.length) {
+                    localRepairNote(notes, clue.clue_id + '/' + variant.variant_id,
+                        '这条写法带出了未获准的秘密特征（' + hits.slice(0, 2).join('、') + '），已整条撤下');
+                    continue;
+                }
+                keptVariants.push(variant);
+            }
+            if (!keptVariants.length) {
+                localRepairNote(notes, clue.clue_id, '所有写法都带出了未获准的秘密特征，本条候选已整条撤下；可用「补充候选」补回');
+                continue;
+            }
+            clue.safe_variants = keptVariants;
+            survivors.push(clue);
+        }
+        d.clues = survivors;
+    }
+
     function repairCompileDraft(draft, options) {
         var d = normalizeCompileDraft(draft);
         var notes = [];
         var cap = STRENGTH_CAPS[options && options.clue_strength] || 3;
+        scrubClaimFingerprints(d, notes);
         repairPublicAnchor(d, notes);
         for (var c = 0; c < d.clues.length; c++) {
             var clue = d.clues[c];
@@ -2887,6 +2965,7 @@
             }
         }
         repairEntryConditionTargets(d, notes);
+        isolateLeakingVariants(d, notes);
         return { draft: d, repairs: uniqueStrings(notes), quarantined: [] };
     }
 
@@ -3193,7 +3272,10 @@
             if (!claim.text || claim.text.length > 120) errors.push('claim ' + claim.claim_id + ' text 必须为1-120字');
             if (layerIndex(claim.layer) < 0) errors.push('claim ' + claim.claim_id + ' layer 非法');
             if (stageIndex(claim.earliest_stage) < 0) errors.push('claim ' + claim.claim_id + ' earliest_stage 非法');
-            if (!claim.fingerprints.length || claim.fingerprints.length > 6) errors.push('claim ' + claim.claim_id + ' fingerprints 必须为1-6项');
+            if (claim.fingerprints.length > 6) errors.push('claim ' + claim.claim_id + ' fingerprints 最多 6 项');
+            /* v1.7.0：指纹被清污后可能一条不剩。这不该让整个故事锁不了——
+               命题本身对档位推进仍然有效，只是运行期不再靠指纹拦它，提醒作者留意即可。 */
+            if (!claim.fingerprints.length) warnings.push('claim ' + claim.claim_id + ' 没有可用的秘密指纹（原指纹已在公开层出现或属编译内部术语），运行期不会靠指纹拦截它，请作者重点预览');
             for (var fp = 0; fp < claim.fingerprints.length; fp++) {
                 if (!claim.fingerprints[fp] || claim.fingerprints[fp].length > 60) errors.push('claim ' + claim.claim_id + ' fingerprint 必须为1-60字');
                 if (claim.fingerprints[fp].length < 4) warnings.push('claim ' + claim.claim_id + ' 含短指纹“' + claim.fingerprints[fp] + '”，请作者重点预览');
