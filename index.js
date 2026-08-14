@@ -152,7 +152,8 @@
                 next_due: 1,           // 下一次投放的相对轮（点亮后第一条玩家消息即首个机会）
                 cursor: 0,             // 已送条数（派生自 used 计数）
                 active_id: null,       // 台上线索 id
-                planned: null,         // 智能调度的预选：{ for_round, clue_id }
+                planned: null,         // smart: {for_round, clue_id} / supervise: {for_round, god_text|hold}
+                hold_streak: 0,        // AI 监督连续暂缓计数
                 lit_at: null
             },
             draft: null,               // 编译中断续跑用：{ clues: [], batch_done: n }
@@ -563,7 +564,7 @@
             }).then(function (out) {
                 if (trim(out)) return String(out);
                 throw new Error('酒馆连接返回为空。');
-            });
+            }).catch(function (e) { throw dressTavernError(e); });
         }
         if (typeof c.generateQuietPrompt === 'function') {
             return Promise.resolve().then(function () {
@@ -574,9 +575,48 @@
             }).then(function (out) {
                 if (trim(out)) return String(out);
                 throw new Error('酒馆连接返回为空。');
-            });
+            }).catch(function (e) { throw dressTavernError(e); });
         }
         return Promise.reject(new Error('当前酒馆版本没有 raw / quiet 生成能力，请改用独立 API。'));
+    }
+
+    /* 把酒馆航道的裸报错翻译成人话与自救指引 */
+    function dressTavernError(e) {
+        var msg = trim(e && e.message || e) || '未知错误';
+        var hint = '';
+        if (/504|timeout|timed out/i.test(msg)) {
+            hint = '——这是上游等太久被网关掐断（酒馆连接是非流式的通病）。解法：④连接里取消勾选"使用酒馆当前连接"，改填独立 API 走流式。DS 官网填 https://api.deepseek.com + deepseek-chat（max_tokens ≤ 8192）。';
+        } else if (/Internal Server Error|500/i.test(msg)) {
+            hint = '——上游服务出错。若反复出现，建议改用独立 API 流式编译（DS 官网：https://api.deepseek.com + deepseek-chat）。';
+        }
+        return new Error(msg + hint);
+    }
+
+    /* GET /v1/models → 模型 id 列表（填充 datalist，既能选也能手输） */
+    function fetchModelList(url, key) {
+        var base = trim(url).replace(/\/+$/, '');
+        if (!base) return Promise.reject(new Error('先填 API 地址。'));
+        var modelsUrl = /\/v\d+$/.test(base) ? base + '/models' : base + '/v1/models';
+        var controller = typeof AbortController === 'function' ? new AbortController() : null;
+        var req = fetch(modelsUrl, {
+            method: 'GET',
+            headers: { 'Authorization': 'Bearer ' + (key || '') },
+            signal: controller ? controller.signal : undefined
+        }).then(function (res) {
+            if (!res.ok) return res.text().then(function (raw) { throw new Error('HTTP ' + res.status + '（' + String(raw).slice(0, 80) + '）'); });
+            return res.json();
+        }).then(function (data) {
+            var rows = isArray(data && data.data) ? data.data : (isArray(data) ? data : []);
+            var ids = [];
+            for (var i = 0; i < rows.length; i++) {
+                var id = trim(rows[i] && (rows[i].id || rows[i].model || rows[i].name));
+                if (id) ids.push(id);
+            }
+            if (!ids.length) throw new Error('接口通了，但没有返回模型列表。');
+            ids.sort();
+            return ids;
+        });
+        return withTimeout(req, 20000, function () { if (controller) controller.abort(); });
     }
 
     function callCompilerApi(systemPrompt, userPrompt, onProgress) {
@@ -674,6 +714,7 @@
         if (!st) return Promise.reject(new Error('请先打开一个聊天。'));
         if (compileState.running) return Promise.reject(new Error('编译正在进行中。'));
         if (!trim(st.hidden_secret)) return Promise.reject(new Error('隐藏脉络还是空的——先把秘密写给小萤火。'));
+        if (st.config.run_mode === 'supervise') return Promise.reject(new Error('AI 监督模式不需要编译——写好秘密直接点亮即可。'));
         if (st.status === 'lit') return Promise.reject(new Error('故事正在点亮中。请先熄灭，再重新编译。'));
 
         var target = clamp(parseInt(st.config.clue_count, 10) || 10, 1, 200);
@@ -882,21 +923,27 @@
         // 2) 轮钟前进
         st.clock.round += 1;
 
-        // 3) 到点且台上无人且还有存货 → 选牌上台
-        var pool = unusedClues(st);
-        if (!st.clock.active_id && pool.length && st.clock.round >= st.clock.next_due) {
-            var picked = pickClueForRound(st);
-            var next = picked.clue;
-            st.clock.active_id = next.id;
-            st.clock.planned = null;   // 预选一经消费即作废
-            next.delivered_count = 0;
-            injectText(next.text);
-            st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
-            log('第 ' + st.clock.round + ' 轮：线索上台' + (picked.via ? '（' + picked.via + '）' : '') + '，将随下一次回复送出。');
+        // 3) 到点且台上无人 → 上台（三档各走各的小内核）
+        if (!st.clock.active_id && st.clock.round >= st.clock.next_due) {
+            if (st.config.run_mode === 'supervise') {
+                superviseDispatch(st);
+            } else {
+                var pool = unusedClues(st);
+                if (pool.length) {
+                    var picked = pickClueForRound(st);
+                    var next = picked.clue;
+                    st.clock.active_id = next.id;
+                    st.clock.planned = null;   // 预选一经消费即作废
+                    next.delivered_count = 0;
+                    injectText(next.text);
+                    st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
+                    log('第 ' + st.clock.round + ' 轮：线索上台' + (picked.via ? '（' + picked.via + '）' : '') + '，将随下一次回复送出。');
+                }
+            }
         }
 
-        // 4) 存货耗尽收尾（不等下一个到点，退役即收）
-        if (!st.clock.active_id && !unusedClues(st).length && st.status !== 'finished') {
+        // 4) 存货耗尽收尾（仅编译制模式；AI 监督没有"送完"概念，故事由 God 陪到最后）
+        if (st.config.run_mode !== 'supervise' && !st.clock.active_id && !unusedClues(st).length && st.status !== 'finished') {
             st.status = 'finished';
             clearInjection();
             log('所有线索都已送完。故事的真相，现在交给你们自己走完。');
@@ -904,6 +951,30 @@
         }
         saveStory();
         renderPanel();
+    }
+
+    /* AI 监督：消费 God 在空档里给出的裁决 */
+    function superviseDispatch(st) {
+        var plan = st.clock.planned;
+        st.clock.planned = null;
+        if (plan && plan.for_round === st.clock.round && trim(plan.god_text)) {
+            // God 设计的指示已过安检 → 入账本并上台（复用全部簿记）
+            var clue = { id: uid('god'), text: trim(plan.god_text), used: false, delivered_count: 0 };
+            st.clues.push(clue);
+            st.clock.active_id = clue.id;
+            st.clock.hold_streak = 0;
+            injectText(clue.text);
+            st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
+            log('第 ' + st.clock.round + ' 轮：God 递来一条现场设计的指示，将随下一次回复送出。');
+        } else if (plan && plan.for_round === st.clock.round && plan.hold) {
+            st.clock.hold_streak = (st.clock.hold_streak || 0) + 1;
+            st.clock.next_due = st.clock.round + 1;   // 暂缓：下一轮再问
+            log('第 ' + st.clock.round + ' 轮：God 判断此刻不宜递光，暂缓一轮。');
+            if (st.clock.hold_streak >= 3) log('⚠ God 已连续暂缓 ' + st.clock.hold_streak + ' 轮。若嫌节奏慢，可检查秘密写法是否给了它可下手的素材，或调高线索力度。');
+        } else {
+            st.clock.next_due = st.clock.round + 1;   // 没来得及/失败：下一轮再试
+            log('第 ' + st.clock.round + ' 轮：God 未及回应，本轮不投，下一轮再问。');
+        }
     }
 
     /* AI 回复落地（含每一次重抽的落地） */
@@ -929,37 +1000,110 @@
     var planFlight = null;   // 防重复起飞
 
     function maybePlanAhead(st) {
-        if (st.config.run_mode !== 'smart' || st.status !== 'lit') return;
+        if (st.status !== 'lit') return;
+        var mode = st.config.run_mode;
+        if (mode !== 'smart' && mode !== 'supervise') return;
         var nextRound = st.clock.round + 1;
         if (st.clock.active_id) return;                       // 台上还有人，下一轮不投
         if (nextRound < st.clock.next_due) return;            // 下一轮不到点
-        var pool = unusedClues(st);
-        if (pool.length <= 1) return;                         // 0/1 条无需选牌
         if (st.clock.planned && st.clock.planned.for_round === nextRound) return;  // 已规划
         if (planFlight) return;
 
-        var window_ = pool.slice(0, 5);                       // 候选窗口：未用池头 5 条，保持大体递进
-        var recent = recentStoryText(10, 3000);
-        planFlight = callSchedulerApi(schedulerSystemPrompt(), schedulerUserPrompt(recent.text, window_))
+        if (mode === 'smart') {
+            var pool = unusedClues(st);
+            if (pool.length <= 1) return;                     // 0/1 条无需选牌
+            var window_ = pool.slice(0, 5);                   // 候选窗口：未用池头 5 条，保持大体递进
+            var recent = recentStoryText(10, 3000);
+            planFlight = callSchedulerApi(schedulerSystemPrompt(), schedulerUserPrompt(recent.text, window_))
+                .then(function (raw) {
+                    var picked = matchClueIdInText(raw, window_);
+                    var fresh = story();
+                    if (!fresh || fresh.config.run_mode !== 'smart' || fresh.status !== 'lit') return;
+                    if (picked) {
+                        fresh.clock.planned = { for_round: nextRound, clue_id: picked.id };
+                        log('调度员已为下一次机会选牌。');
+                    } else {
+                        fresh.clock.planned = null;
+                        log('调度员回话看不懂，届时按顺序发牌兜底。');
+                    }
+                    saveStory();
+                })
+                .catch(function (err) {
+                    var fresh = story();
+                    if (fresh) { fresh.clock.planned = null; saveStory(); }
+                    log('调度员出错（' + (err && err.message || err) + '），届时按顺序发牌兜底。');
+                })
+                .then(function () { planFlight = null; });
+            return;
+        }
+
+        // supervise：God 现场裁决
+        var recent2 = recentStoryText(12, 3500);
+        var given = [];
+        for (var g = Math.max(0, st.clues.length - 5); g < st.clues.length; g++) given.push(st.clues[g].text);
+        planFlight = callSchedulerApi(godSystemPrompt(st), godUserPrompt(st, recent2.text, given))
             .then(function (raw) {
-                var picked = matchClueIdInText(raw, window_);
                 var fresh = story();
-                if (!fresh || fresh.config.run_mode !== 'smart' || fresh.status !== 'lit') return;
-                if (picked) {
-                    fresh.clock.planned = { for_round: nextRound, clue_id: picked.id };
-                    log('调度员已为下一次机会选牌。');
+                if (!fresh || fresh.config.run_mode !== 'supervise' || fresh.status !== 'lit') return;
+                var verdict = parseGodVerdict(raw, fresh);
+                if (verdict.hold) {
+                    fresh.clock.planned = { for_round: nextRound, hold: true };
+                    log('God 裁决：此刻暂缓。');
+                } else if (verdict.text) {
+                    fresh.clock.planned = { for_round: nextRound, god_text: verdict.text };
+                    log('God 已为下一次机会设计好一条指示。');
                 } else {
-                    fresh.clock.planned = null;
-                    log('调度员回话看不懂，届时按顺序发牌兜底。');
+                    fresh.clock.planned = { for_round: nextRound, hold: true };
+                    log('God 的设计被安检拦下（' + verdict.reason + '），按暂缓处理。');
                 }
                 saveStory();
             })
             .catch(function (err) {
                 var fresh = story();
                 if (fresh) { fresh.clock.planned = null; saveStory(); }
-                log('调度员出错（' + (err && err.message || err) + '），届时按顺序发牌兜底。');
+                log('God 出错（' + (err && err.message || err) + '），届时本轮不投。');
             })
             .then(function () { planFlight = null; });
+    }
+
+    /* ---- AI 监督：God 提示词与裁决解析 ---- */
+
+    function godSystemPrompt(st) {
+        return [
+            '你是一个角色扮演故事的隐藏叙事监督者。你知晓完整秘密，演员不知晓。',
+            '你的职责：阅读近期剧情，判断此刻是否适合向"扮演角色的演员"递一条舞台指示，让剧情朝真相自然靠近一步。',
+            '',
+            '裁决规则：',
+            '1. 若此刻剧情正紧、气氛不宜、或玩家正专注于别的事——第一行只输出 HOLD，不输出其他任何字。',
+            '2. 若适合递光——直接输出一条 30～80 字的舞台指示：告诉演员这一幕可以自然带出什么迹象。用祈使或描述句，扎根于当前场景里真实存在的人物、地点、物件。',
+            '3. 指示绝不能说破秘密本身，不出现"线索""秘密""真相"这类出戏的词，不使用 {{ }} 宏。',
+            '4. 力度要求——' + (INTENSITY_TEXT[st.config.intensity] || INTENSITY_TEXT.standard),
+            (st.banned_words.length ? '5. 以下词语绝对禁止出现：' + st.banned_words.join('、') : ''),
+            '',
+            '只输出 HOLD 或指示文本本身，不要解释，不要 Markdown。'
+        ].join('\n');
+    }
+
+    function godUserPrompt(st, recentText, givenList) {
+        var parts = [];
+        parts.push('【完整秘密（绝密，仅你可见）】\n' + st.hidden_secret);
+        parts.push('【近期剧情】\n' + (recentText || '（故事尚未开场）'));
+        if (givenList.length) parts.push('【你此前已递出的指示（不要重复它们的意象）】\n' + givenList.map(function (t, i) { return (i + 1) + '. ' + t; }).join('\n'));
+        parts.push('现在裁决：HOLD，或直接写出这一程的指示。');
+        return parts.join('\n\n');
+    }
+
+    function parseGodVerdict(rawText, st) {
+        var raw = trim(rawText);
+        if (!raw) return { hold: true };
+        if (/^HOLD\b/i.test(raw)) return { hold: true };
+        // 剥掉可能的引号与代码块
+        var text = raw.replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/, '');
+        text = trim(text.replace(/^[「"']+|[」"']+$/g, ''));
+        if (text.length > 300) text = text.slice(0, 300);
+        var vetted = vetClues([text], st);
+        if (!vetted.pass.length) return { hold: false, text: '', reason: vetted.rejected[0].reason };
+        return { hold: false, text: vetted.pass[0] };
     }
 
     function schedulerSystemPrompt() {
@@ -1058,8 +1202,14 @@
     function lightUp() {
         var st = story();
         if (!st) return toast('请先打开一个聊天', 'warning');
-        if (st.status !== 'compiled') return toast('先完成编译并确认线索，才能点亮', 'warning');
-        if (!st.clues.length) return toast('没有可用线索', 'warning');
+        readFormIntoStory();
+        if (st.config.run_mode === 'supervise') {
+            if (!trim(st.hidden_secret)) return toast('AI 监督模式：把隐藏脉络写好即可点亮，无需编译', 'warning');
+            if (st.status === 'lit') return;
+        } else {
+            if (st.status !== 'compiled') return toast('先完成编译并确认线索，才能点亮', 'warning');
+            if (!st.clues.length) return toast('没有可用线索', 'warning');
+        }
         st.status = 'lit';
         if (!st.clock.lit_at) {
             st.clock.lit_at = nowIso();
@@ -1126,6 +1276,9 @@
         if (compileState.running) return { text: '正在编译……', next: '等它写完，或点「停止」。' };
         switch (st.status) {
             case 'empty':
+                if (st.config.run_mode === 'supervise') {
+                    return { text: '这个聊天还没有故事。', next: 'AI 监督模式：写下隐藏脉络后直接点亮，God 现场设计每一程光。' };
+                }
                 if (st.draft && isArray(st.draft.clues) && st.draft.clues.length) {
                     return { text: '上次编译中断，已保住 ' + st.draft.clues.length + ' 条草稿。', next: '点「编译」即可从断点续跑。' };
                 }
@@ -1138,7 +1291,9 @@
             case 'lit': {
                 var current = activeClue(st);
                 var sent = st.clock.cursor;
-                var base = '第 ' + st.clock.round + ' 轮 · 已送 ' + sent + '/' + st.clues.length + ' 条';
+                var base = st.config.run_mode === 'supervise'
+                    ? ('第 ' + st.clock.round + ' 轮 · God 已递 ' + sent + ' 程光')
+                    : ('第 ' + st.clock.round + ' 轮 · 已送 ' + sent + '/' + st.clues.length + ' 条');
                 if (current && current.delivered_count > 0) {
                     return { text: base + ' · 一条线索正在演出中。', next: '正常继续对话即可；重抽也会带着它。' };
                 }
@@ -1149,6 +1304,12 @@
                 if (st.config.run_mode === 'smart') {
                     smartNote = (st.clock.planned && st.clock.planned.for_round === st.clock.round + 1)
                         ? ' 调度员已选好下一张牌。' : ' 调度员将在空档里选牌。';
+                }
+                if (st.config.run_mode === 'supervise') {
+                    var p = st.clock.planned;
+                    smartNote = (p && p.for_round === st.clock.round + 1)
+                        ? (p.god_text ? ' God 已设计好下一程。' : ' God 裁决暂缓。')
+                        : ' God 将在空档里裁决。';
                 }
                 return { text: base + ' · 下一条预计在第 ' + st.clock.next_due + ' 轮。', next: '正常玩就好，到点它自己来。' + smartNote };
             }
@@ -1273,7 +1434,7 @@
         st.config.clue_count = clamp(manualCount || Math.ceil(st.config.total_rounds / st.config.interval), 1, 200);
         st.config.intensity = String($('#lcl2_intensity').val() || 'standard');
         var rm = String($('input[name=lcl2_runmode]:checked').val() || st.config.run_mode || 'uniform');
-        if (rm === 'uniform' || rm === 'smart') st.config.run_mode = rm;
+        if (rm === 'uniform' || rm === 'smart' || rm === 'supervise') st.config.run_mode = rm;
         st.config.author_mode = $('#lcl2_author').prop('checked');
         saveStory();
         return st;
@@ -1349,7 +1510,7 @@
         '        <div class="lcl2-run-row">' +
         '          <label class="lcl2-run"><input type="radio" name="lcl2_runmode" value="uniform" checked><span><b>⏳ 均匀散落</b><small>提前排好 · 按时发牌 · 运行零 API</small></span></label>' +
         '          <label class="lcl2-run"><input type="radio" name="lcl2_runmode" value="smart"><span><b>🃏 智能调度</b><small>小模型现场选牌 · 失败自动按顺序兜底</small></span></label>' +
-        '          <label class="lcl2-run lcl2-run-off"><input type="radio" name="lcl2_runmode" value="supervise" disabled><span><b>👁 AI 监督</b><small>God 现场设计 · Phase 3 施工中</small></span></label>' +
+        '          <label class="lcl2-run"><input type="radio" name="lcl2_runmode" value="supervise"><span><b>👁 AI 监督</b><small>God 现场设计每一程光 · 无需编译 · 建议连强模型</small></span></label>' +
         '        </div>' +
         '        <label class="checkbox_label"><input id="lcl2_author" type="checkbox" checked><span>作者模式（可预览和修改线索；关掉即盲玩）</span></label>' +
         '        <div class="lcl2-row">' +
@@ -1378,11 +1539,15 @@
         '      <details class="lcl2-sec"><summary>④ 连接（仅编译时使用）</summary>' +
         '        <label class="checkbox_label"><input id="lcl2_use_tavern" type="checkbox"><span>使用酒馆当前连接（非流式，长编译可能被中转掐断；建议优先用下方独立 API）</span></label>' +
         '        <label class="lcl2-label">独立 API 地址</label>' +
-        '        <input id="lcl2_api_url" class="text_pole" type="text" placeholder="https://api.example.com/v1">' +
+        '        <input id="lcl2_api_url" class="text_pole" type="text" placeholder="例：https://api.deepseek.com 或中转地址">' +
         '        <label class="lcl2-label">密钥</label>' +
         '        <input id="lcl2_api_key" class="text_pole" type="password" placeholder="sk-...">' +
         '        <label class="lcl2-label">模型名</label>' +
-        '        <input id="lcl2_api_model" class="text_pole" type="text" placeholder="例：claude-sonnet-4-6 / gemini-2.5-pro">' +
+        '        <div class="lcl2-model-row">' +
+        '          <input id="lcl2_api_model" class="text_pole" type="text" list="lcl2_models_dl" placeholder="例：deepseek-chat / claude-sonnet-4-6">' +
+        '          <button id="lcl2_btn_models" class="menu_button" title="从 API 拉取可用模型列表">拉取模型</button>' +
+        '        </div>' +
+        '        <datalist id="lcl2_models_dl"></datalist>' +
         '        <div class="lcl2-grid">' +
         '          <div><label class="lcl2-label">超时（秒）</label><input id="lcl2_api_timeout" class="text_pole" type="number" min="30" max="900"></div>' +
         '          <div><label class="lcl2-label">单批 max_tokens</label><input id="lcl2_api_maxtok" class="text_pole" type="number" min="500"></div>' +
@@ -1393,10 +1558,14 @@
         '          <span id="lcl2_test_result" class="lcl2-dim"></span>' +
         '        </div>' +
         '        <hr class="lcl2-hr">' +
-        '        <label class="lcl2-label"><b>调度员连接</b>（智能调度专用，可填便宜快模型如 flash；三项留空 = 复用上方编译连接）</label>' +
+        '        <label class="lcl2-label"><b>调度员 / God 连接</b>（智能调度可填便宜快模型；AI 监督建议强模型；三项留空 = 复用上方编译连接）</label>' +
         '        <input id="lcl2_api2_url" class="text_pole" type="text" placeholder="调度员 API 地址（可留空）">' +
         '        <input id="lcl2_api2_key" class="text_pole" type="password" placeholder="调度员密钥（可留空）" style="margin-top:6px">' +
-        '        <input id="lcl2_api2_model" class="text_pole" type="text" placeholder="调度员模型名，例：gemini-2.5-flash（可留空）" style="margin-top:6px">' +
+        '        <div class="lcl2-model-row" style="margin-top:6px">' +
+        '          <input id="lcl2_api2_model" class="text_pole" type="text" list="lcl2_models2_dl" placeholder="调度员/God 模型名（可留空）">' +
+        '          <button id="lcl2_btn_models2" class="menu_button" title="从调度员 API 拉取模型列表">拉取模型</button>' +
+        '        </div>' +
+        '        <datalist id="lcl2_models2_dl"></datalist>' +
         '        <div class="lcl2-row">' +
         '          <button id="lcl2_btn_test2" class="menu_button">测试调度员</button>' +
         '          <span id="lcl2_test2_result" class="lcl2-dim"></span>' +
@@ -1429,11 +1598,38 @@
         });
         $root.on('change', 'input[name=lcl2_runmode]', function () {
             var st = readFormIntoStory();
-            if (st) log('运行方式切换为：' + (st.config.run_mode === 'smart' ? '智能调度' : '均匀散落'));
+            if (st) log('运行方式切换为：' + ({ uniform: '均匀散落', smart: '智能调度', supervise: 'AI 监督' }[st.config.run_mode] || st.config.run_mode));
             renderPanel();
         });
         $root.on('change input', '#lcl2_api_url, #lcl2_api_key, #lcl2_api_model, #lcl2_api_timeout, #lcl2_api_maxtok, #lcl2_use_tavern, #lcl2_depth, #lcl2_api2_url, #lcl2_api2_key, #lcl2_api2_model', function () {
             readFormIntoSettings();
+        });
+        function fillDatalist(dlId, ids) {
+            var html = '';
+            for (var i = 0; i < ids.length; i++) html += '<option value="' + esc(ids[i]) + '">';
+            $('#' + dlId).html(html);
+        }
+        $root.on('click', '#lcl2_btn_models', function () {
+            var s = readFormIntoSettings();
+            var $btn = $(this).prop('disabled', true).text('拉取中…');
+            fetchModelList(s.api.url, s.api.key).then(function (ids) {
+                fillDatalist('lcl2_models_dl', ids);
+                toast('拉到 ' + ids.length + ' 个模型，点模型名输入框即可选择', 'success');
+            }).catch(function (err) {
+                toast('拉取失败：' + (err && err.message || err), 'error');
+            }).then(function () { $btn.prop('disabled', false).text('拉取模型'); });
+        });
+        $root.on('click', '#lcl2_btn_models2', function () {
+            var s = readFormIntoSettings();
+            var url = trim(s.api2.url) || s.api.url;
+            var key = trim(s.api2.key) || s.api.key;
+            var $btn = $(this).prop('disabled', true).text('拉取中…');
+            fetchModelList(url, key).then(function (ids) {
+                fillDatalist('lcl2_models2_dl', ids);
+                toast('拉到 ' + ids.length + ' 个模型，点模型名输入框即可选择', 'success');
+            }).catch(function (err) {
+                toast('拉取失败：' + (err && err.message || err), 'error');
+            }).then(function () { $btn.prop('disabled', false).text('拉取模型'); });
         });
         $root.on('click', '#lcl2_btn_test2', function () {
             readFormIntoSettings();

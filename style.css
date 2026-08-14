@@ -257,3 +257,8 @@ body.reduced-motion .lcl2-firefly { animation: none; }
     border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 55%, transparent);
     margin: 12px 0 4px;
 }
+
+/* 模型名 + 拉取按钮同行 */
+.lcl2-model-row { display: flex; gap: 8px; }
+.lcl2-model-row input { flex: 1 1 auto; min-width: 0; }
+.lcl2-model-row .menu_button { flex: 0 0 auto; min-width: 0; white-space: nowrap; }
