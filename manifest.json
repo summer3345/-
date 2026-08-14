@@ -1,12 +1,12 @@
 {
-    "display_name": "Luciole",
+    "display_name": "Luciole 2.0",
     "loading_order": 100,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "author": "GPT × Claude × ripple",
-    "version": "1.7.0",
+    "author": "Claude Fable 5 × ripple",
+    "version": "2.0.0",
     "minimum_client_version": "1.14.0",
     "homePage": ""
 }
