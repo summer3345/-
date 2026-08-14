@@ -232,3 +232,28 @@ body.reduced-motion .lcl2-firefly { animation: none; }
     .lcl2-log { max-height: 160px; }
     .lcl2-mode small { display: none; }
 }
+
+/* ============ 运行方式三档 ============ */
+.lcl2-run-row { display: flex; flex-direction: column; gap: 5px; margin: 2px 0 6px; }
+.lcl2-run {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 9px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 70%, transparent);
+    border-radius: 8px;
+    cursor: pointer;
+}
+.lcl2-run input { margin-top: 3px; }
+.lcl2-run span { display: flex; flex-direction: column; line-height: 1.35; }
+.lcl2-run small { opacity: .6; font-size: .82em; }
+.lcl2-run:has(input:checked) {
+    border-color: #e8a33d;
+    background: color-mix(in srgb, #e8a33d 12%, transparent);
+}
+.lcl2-run-off { opacity: .45; cursor: not-allowed; }
+.lcl2-hr {
+    border: none;
+    border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 55%, transparent);
+    margin: 12px 0 4px;
+}

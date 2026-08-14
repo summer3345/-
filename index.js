@@ -105,7 +105,8 @@
             use_tavern: false,     // true = 用酒馆当前连接（raw/quiet 降级，非流式，可能超时）
             depth: 1,              // setExtensionPrompt 注入深度
             batch_size: DEFAULT_BATCH,
-            show_floater: true     // 萤火虫浮标（可停进避风塘）
+            show_floater: true,    // 萤火虫浮标（可停进避风塘）
+            api2: { url: '', key: '', model: '' }  // 调度员连接（智能调度用；留空复用编译连接）
         };
     }
 
@@ -116,8 +117,10 @@
         var s = root[EXT_NAME];
         var d = defaultSettings();
         if (!isObject(s.api)) s.api = d.api;
+        if (!isObject(s.api2)) s.api2 = d.api2;
         var k;
         for (k in d.api) if (s.api[k] === undefined) s.api[k] = d.api[k];
+        for (k in d.api2) if (s.api2[k] === undefined) s.api2[k] = d.api2[k];
         for (k in d) if (s[k] === undefined) s[k] = d[k];
         return s;
     }
@@ -140,14 +143,16 @@
                 interval: 10,
                 clue_count: 10,
                 intensity: 'standard', // gentle | standard | clear
-                author_mode: true
+                author_mode: true,
+                run_mode: 'uniform'    // uniform | smart（AI 监督为 Phase 3）
             },
             clues: [],                 // { id, text, used, delivered_count }
             clock: {
                 round: 0,              // 相对轮：点亮 = 第 0 轮，此后每条玩家消息 +1
                 next_due: 1,           // 下一次投放的相对轮（点亮后第一条玩家消息即首个机会）
-                cursor: 0,             // 下一条待投线索下标
+                cursor: 0,             // 已送条数（派生自 used 计数）
                 active_id: null,       // 台上线索 id
+                planned: null,         // 智能调度的预选：{ for_round, clue_id }
                 lit_at: null
             },
             draft: null,               // 编译中断续跑用：{ clues: [], batch_done: n }
@@ -800,6 +805,35 @@
         return st.clock.active_id ? findClue(st, st.clock.active_id) : null;
     }
 
+    function usedCount(st) {
+        var n = 0;
+        for (var i = 0; i < st.clues.length; i++) if (st.clues[i].used) n++;
+        return n;
+    }
+
+    function unusedClues(st) {
+        var out = [];
+        for (var i = 0; i < st.clues.length; i++) if (!st.clues[i].used) out.push(st.clues[i]);
+        return out;
+    }
+
+    /* 本轮该投哪条：
+     * 均匀 → 未用池第一条（保持编译时的浅→深顺序）；
+     * 智能 → 调度员预选的那条（若仍有效），否则确定性回退到未用池第一条。 */
+    function pickClueForRound(st) {
+        var pool = unusedClues(st);
+        if (!pool.length) return null;
+        if (st.config.run_mode === 'smart') {
+            var plan = st.clock.planned;
+            if (plan && plan.for_round === st.clock.round) {
+                var chosen = findClue(st, plan.clue_id);
+                if (chosen && !chosen.used) return { clue: chosen, via: '调度员选牌' };
+            }
+            return { clue: pool[0], via: plan === null ? '调度未及完成，按顺序发牌' : '顺序发牌' };
+        }
+        return { clue: pool[0], via: '' };
+    }
+
     function injectText(clueText) {
         var text = [
             '【舞台指示 · 仅本回合】',
@@ -837,9 +871,9 @@
             if (current.delivered_count > 0) {
                 current.used = true;
                 st.clock.active_id = null;
-                st.clock.cursor += 1;
+                st.clock.cursor = usedCount(st);
                 clearInjection();
-                log('第 ' + st.clock.cursor + ' 条已完成使命，退场。');
+                log('一条线索已完成使命，退场（累计已送 ' + st.clock.cursor + ' 条）。');
             } else {
                 // 从未进入任何一次生成（玩家连发消息）——原地等待，不浪费
             }
@@ -848,18 +882,21 @@
         // 2) 轮钟前进
         st.clock.round += 1;
 
-        // 3) 到点且台上无人且还有存货 → 下一条上台
-        if (!st.clock.active_id && st.clock.cursor < st.clues.length && st.clock.round >= st.clock.next_due) {
-            var next = st.clues[st.clock.cursor];
+        // 3) 到点且台上无人且还有存货 → 选牌上台
+        var pool = unusedClues(st);
+        if (!st.clock.active_id && pool.length && st.clock.round >= st.clock.next_due) {
+            var picked = pickClueForRound(st);
+            var next = picked.clue;
             st.clock.active_id = next.id;
+            st.clock.planned = null;   // 预选一经消费即作废
             next.delivered_count = 0;
             injectText(next.text);
             st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
-            log('第 ' + st.clock.round + ' 轮：第 ' + (st.clock.cursor + 1) + '/' + st.clues.length + ' 条线索上台，将随下一次回复送出。');
+            log('第 ' + st.clock.round + ' 轮：线索上台' + (picked.via ? '（' + picked.via + '）' : '') + '，将随下一次回复送出。');
         }
 
         // 4) 存货耗尽收尾（不等下一个到点，退役即收）
-        if (!st.clock.active_id && st.clock.cursor >= st.clues.length && st.status !== 'finished') {
+        if (!st.clock.active_id && !unusedClues(st).length && st.status !== 'finished') {
             st.status = 'finished';
             clearInjection();
             log('所有线索都已送完。故事的真相，现在交给你们自己走完。');
@@ -874,13 +911,122 @@
         var st = story();
         if (!st || st.status !== 'lit') return;
         var current = activeClue(st);
-        if (!current) return;
-        current.delivered_count += 1;
-        if (current.delivered_count === 1) {
-            log('线索已随本次回复进入演出。（重抽会继续带着它，直到你再次发言）');
+        if (current) {
+            current.delivered_count += 1;
+            if (current.delivered_count === 1) {
+                log('线索已随本次回复进入演出。（重抽会继续带着它，直到你再次发言）');
+            }
         }
         saveStory();
         renderPanel();
+        // 一轮流水线：智能调度在两轮之间的空档里后台选牌，
+        // 注入仍在下一次玩家消息时同步发生——时序物理安全不变。
+        maybePlanAhead(st);
+    }
+
+    /* ---- 智能调度：调度员（一轮流水线） ---- */
+
+    var planFlight = null;   // 防重复起飞
+
+    function maybePlanAhead(st) {
+        if (st.config.run_mode !== 'smart' || st.status !== 'lit') return;
+        var nextRound = st.clock.round + 1;
+        if (st.clock.active_id) return;                       // 台上还有人，下一轮不投
+        if (nextRound < st.clock.next_due) return;            // 下一轮不到点
+        var pool = unusedClues(st);
+        if (pool.length <= 1) return;                         // 0/1 条无需选牌
+        if (st.clock.planned && st.clock.planned.for_round === nextRound) return;  // 已规划
+        if (planFlight) return;
+
+        var window_ = pool.slice(0, 5);                       // 候选窗口：未用池头 5 条，保持大体递进
+        var recent = recentStoryText(10, 3000);
+        planFlight = callSchedulerApi(schedulerSystemPrompt(), schedulerUserPrompt(recent.text, window_))
+            .then(function (raw) {
+                var picked = matchClueIdInText(raw, window_);
+                var fresh = story();
+                if (!fresh || fresh.config.run_mode !== 'smart' || fresh.status !== 'lit') return;
+                if (picked) {
+                    fresh.clock.planned = { for_round: nextRound, clue_id: picked.id };
+                    log('调度员已为下一次机会选牌。');
+                } else {
+                    fresh.clock.planned = null;
+                    log('调度员回话看不懂，届时按顺序发牌兜底。');
+                }
+                saveStory();
+            })
+            .catch(function (err) {
+                var fresh = story();
+                if (fresh) { fresh.clock.planned = null; saveStory(); }
+                log('调度员出错（' + (err && err.message || err) + '），届时按顺序发牌兜底。');
+            })
+            .then(function () { planFlight = null; });
+    }
+
+    function schedulerSystemPrompt() {
+        return [
+            '你是隐藏叙事的调度员。下面有若干条候选舞台指示，请从中选出最贴合当前剧情现场的一条。',
+            '你只有选牌权，没有创作权。',
+            '只输出所选那条的编号（形如 clue_xxxxx），不要输出任何其他文字。'
+        ].join('\n');
+    }
+
+    function schedulerUserPrompt(recentText, candidates) {
+        var lines = ['【近期剧情】', recentText || '（新故事，尚无剧情）', '', '【候选舞台指示】'];
+        for (var i = 0; i < candidates.length; i++) {
+            lines.push('编号 ' + candidates[i].id + '：' + candidates[i].text);
+        }
+        lines.push('');
+        lines.push('只输出最合适那条的编号。');
+        return lines.join('\n');
+    }
+
+    /* 解析器：直接在回话里搜候选 id 子串，出现位置最靠前者当选。
+     * id 是随机串，不存在误匹配——这比让小模型写合法 JSON 可靠得多。 */
+    function matchClueIdInText(rawText, candidates) {
+        var text = String(rawText || '');
+        var best = null;
+        var bestPos = Infinity;
+        for (var i = 0; i < candidates.length; i++) {
+            var pos = text.indexOf(candidates[i].id);
+            if (pos >= 0 && pos < bestPos) { bestPos = pos; best = candidates[i]; }
+        }
+        return best;
+    }
+
+    /* 调度员连接：独立配置，留空复用编译连接；小请求、零温度、短超时 */
+    function callSchedulerApi(systemPrompt, userPrompt) {
+        var s = settings();
+        var prof = {
+            url: trim(s.api2.url) || s.api.url,
+            key: trim(s.api2.key) || s.api.key,
+            model: trim(s.api2.model) || s.api.model
+        };
+        if (!trim(prof.url) || !trim(prof.model)) {
+            return Promise.reject(new Error('调度员连接未配置（也没有可复用的编译连接）'));
+        }
+        var controller = typeof AbortController === 'function' ? new AbortController() : null;
+        var request = fetch(normalizeApiUrl(prof.url), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (prof.key || '') },
+            body: JSON.stringify({
+                model: prof.model,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userPrompt }
+                ],
+                max_tokens: 200,
+                temperature: 0,
+                stream: false
+            }),
+            signal: controller ? controller.signal : undefined
+        }).then(function (res) {
+            if (!res.ok) return res.text().then(function (raw) { throw new Error('HTTP ' + res.status + '（' + String(raw).slice(0, 80) + '）'); });
+            return res.text().then(function (raw) {
+                try { return extractFromJsonText(raw); }
+                catch (e) { return raw; }   // 有的中转裸回文本——反正解析器只搜 id 子串
+            });
+        });
+        return withTimeout(request, 45000, function () { if (controller) controller.abort(); });
     }
 
     /* 切换聊天：现场还原 */
@@ -895,7 +1041,7 @@
                     // 离场前已完成使命 → 补退役
                     current.used = true;
                     st.clock.active_id = null;
-                    st.clock.cursor += 1;
+                    st.clock.cursor = usedCount(st);
                     log('回到这个故事：上次台上的线索已完成，补记退场。');
                 } else {
                     injectText(current.text);
@@ -942,6 +1088,7 @@
         clearInjection();
         for (var i = 0; i < st.clues.length; i++) { st.clues[i].used = false; st.clues[i].delivered_count = 0; }
         st.clock = blankStory().clock;
+        st.clock.planned = null;
         if (st.status === 'lit' || st.status === 'finished') st.status = 'compiled';
         saveStory();
         log('进度已归零，线索完好。可以重新点亮。');
@@ -998,7 +1145,12 @@
                 if (current) {
                     return { text: base + ' · 一条线索已上台，等待下一次回复。', next: '等 AI 回复，或直接继续。' };
                 }
-                return { text: base + ' · 下一条预计在第 ' + st.clock.next_due + ' 轮。', next: '正常玩就好，到点它自己来。' };
+                var smartNote = '';
+                if (st.config.run_mode === 'smart') {
+                    smartNote = (st.clock.planned && st.clock.planned.for_round === st.clock.round + 1)
+                        ? ' 调度员已选好下一张牌。' : ' 调度员将在空档里选牌。';
+                }
+                return { text: base + ' · 下一条预计在第 ' + st.clock.next_due + ' 轮。', next: '正常玩就好，到点它自己来。' + smartNote };
             }
             case 'finished':
                 return { text: '所有 ' + st.clues.length + ' 条线索都已送完。', next: '想再来一轮就「重置进度」，或「清空」开新故事。' };
@@ -1022,6 +1174,7 @@
             fillIfIdle('#lcl2_interval', st.config.interval);
             fillIfIdle('#lcl2_count', st.config.clue_count);
             $('#lcl2_intensity').val(st.config.intensity);
+            $('input[name=lcl2_runmode][value="' + (st.config.run_mode || 'uniform') + '"]').prop('checked', true);
             $('#lcl2_author').prop('checked', !!st.config.author_mode);
         }
         var s = settings();
@@ -1031,6 +1184,9 @@
         fillIfIdle('#lcl2_api_timeout', s.api.timeout_s);
         fillIfIdle('#lcl2_api_maxtok', s.api.max_tokens);
         fillIfIdle('#lcl2_depth', s.depth);
+        fillIfIdle('#lcl2_api2_url', s.api2.url);
+        fillIfIdle('#lcl2_api2_key', s.api2.key);
+        fillIfIdle('#lcl2_api2_model', s.api2.model);
         $('#lcl2_use_tavern').prop('checked', !!s.use_tavern);
 
         renderClueList();
@@ -1116,6 +1272,8 @@
         var manualCount = parseInt($('#lcl2_count').val(), 10);
         st.config.clue_count = clamp(manualCount || Math.ceil(st.config.total_rounds / st.config.interval), 1, 200);
         st.config.intensity = String($('#lcl2_intensity').val() || 'standard');
+        var rm = String($('input[name=lcl2_runmode]:checked').val() || st.config.run_mode || 'uniform');
+        if (rm === 'uniform' || rm === 'smart') st.config.run_mode = rm;
         st.config.author_mode = $('#lcl2_author').prop('checked');
         saveStory();
         return st;
@@ -1130,6 +1288,9 @@
         s.api.max_tokens = clamp(parseInt($('#lcl2_api_maxtok').val(), 10) || 4000, 500, 32000);
         s.use_tavern = $('#lcl2_use_tavern').prop('checked');
         s.depth = clamp(parseInt($('#lcl2_depth').val(), 10) || 1, 0, 20);
+        s.api2.url = trim($('#lcl2_api2_url').val());
+        s.api2.key = trim($('#lcl2_api2_key').val());
+        s.api2.model = trim($('#lcl2_api2_model').val());
         saveSettings();
         return s;
     }
@@ -1161,9 +1322,9 @@
         '  <div class="lcl2-body">' +
 
         '      <div class="lcl2-mode-row">' +
-        '        <button class="lcl2-mode lcl2-mode-on" data-mode="uniform">⏳ 均匀散落<small>提前排好 · 按时发牌</small></button>' +
-        '        <button class="lcl2-mode" data-mode="smart" disabled title="Phase 2 施工中">🃏 智能调度<small>小模型现场选牌 · 施工中</small></button>' +
-        '        <button class="lcl2-mode" data-mode="supervise" disabled title="Phase 3 施工中">👁 AI 监督<small>God 现场设计 · 施工中</small></button>' +
+        '        <button class="lcl2-mode lcl2-mode-on">⏳ 帷幕沙漏<small>第一幕 · 进行中</small></button>' +
+        '        <button class="lcl2-mode" disabled title="第二幕，敬请期待">✨ 星星点灯<small>第二幕 · 敬请期待</small></button>' +
+        '        <button class="lcl2-mode" disabled title="第三幕，敬请期待">🌫 迷雾森林<small>第三幕 · 敬请期待</small></button>' +
         '      </div>' +
 
         '      <div class="lcl2-status">' +
@@ -1183,6 +1344,12 @@
         '          <div><label class="lcl2-label">线索力度</label><select id="lcl2_intensity" class="text_pole">' +
         '            <option value="gentle">轻柔</option><option value="standard" selected>标准</option><option value="clear">清晰</option>' +
         '          </select></div>' +
+        '        </div>' +
+        '        <label class="lcl2-label">运行方式</label>' +
+        '        <div class="lcl2-run-row">' +
+        '          <label class="lcl2-run"><input type="radio" name="lcl2_runmode" value="uniform" checked><span><b>⏳ 均匀散落</b><small>提前排好 · 按时发牌 · 运行零 API</small></span></label>' +
+        '          <label class="lcl2-run"><input type="radio" name="lcl2_runmode" value="smart"><span><b>🃏 智能调度</b><small>小模型现场选牌 · 失败自动按顺序兜底</small></span></label>' +
+        '          <label class="lcl2-run lcl2-run-off"><input type="radio" name="lcl2_runmode" value="supervise" disabled><span><b>👁 AI 监督</b><small>God 现场设计 · Phase 3 施工中</small></span></label>' +
         '        </div>' +
         '        <label class="checkbox_label"><input id="lcl2_author" type="checkbox" checked><span>作者模式（可预览和修改线索；关掉即盲玩）</span></label>' +
         '        <div class="lcl2-row">' +
@@ -1225,6 +1392,15 @@
         '          <button id="lcl2_btn_test" class="menu_button">测试连接</button>' +
         '          <span id="lcl2_test_result" class="lcl2-dim"></span>' +
         '        </div>' +
+        '        <hr class="lcl2-hr">' +
+        '        <label class="lcl2-label"><b>调度员连接</b>（智能调度专用，可填便宜快模型如 flash；三项留空 = 复用上方编译连接）</label>' +
+        '        <input id="lcl2_api2_url" class="text_pole" type="text" placeholder="调度员 API 地址（可留空）">' +
+        '        <input id="lcl2_api2_key" class="text_pole" type="password" placeholder="调度员密钥（可留空）" style="margin-top:6px">' +
+        '        <input id="lcl2_api2_model" class="text_pole" type="text" placeholder="调度员模型名，例：gemini-2.5-flash（可留空）" style="margin-top:6px">' +
+        '        <div class="lcl2-row">' +
+        '          <button id="lcl2_btn_test2" class="menu_button">测试调度员</button>' +
+        '          <span id="lcl2_test2_result" class="lcl2-dim"></span>' +
+        '        </div>' +
         '      </details>' +
 
         '      <details class="lcl2-sec"><summary>⑤ 日志</summary>' +
@@ -1251,8 +1427,22 @@
             readFormIntoStory();
             if (this.id === 'lcl2_author') renderClueList();
         });
-        $root.on('change input', '#lcl2_api_url, #lcl2_api_key, #lcl2_api_model, #lcl2_api_timeout, #lcl2_api_maxtok, #lcl2_use_tavern, #lcl2_depth', function () {
+        $root.on('change', 'input[name=lcl2_runmode]', function () {
+            var st = readFormIntoStory();
+            if (st) log('运行方式切换为：' + (st.config.run_mode === 'smart' ? '智能调度' : '均匀散落'));
+            renderPanel();
+        });
+        $root.on('change input', '#lcl2_api_url, #lcl2_api_key, #lcl2_api_model, #lcl2_api_timeout, #lcl2_api_maxtok, #lcl2_use_tavern, #lcl2_depth, #lcl2_api2_url, #lcl2_api2_key, #lcl2_api2_model', function () {
             readFormIntoSettings();
+        });
+        $root.on('click', '#lcl2_btn_test2', function () {
+            readFormIntoSettings();
+            $('#lcl2_test2_result').text('测试中……');
+            callSchedulerApi('连通性测试。只输出：PING_OK', '请输出。')
+                .then(function (raw) {
+                    $('#lcl2_test2_result').text(String(raw).indexOf('PING_OK') >= 0 ? '✓ 调度员在线。' : '△ 通了，但回话不规矩（选牌解析只搜编号，问题不大）。');
+                })
+                .catch(function (err) { $('#lcl2_test2_result').text('✗ ' + (err && err.message || err)); });
         });
 
         $root.on('click', '#lcl2_btn_compile', function () {
@@ -1301,13 +1491,9 @@
             var id = $(this).closest('.lcl2-clue').data('id');
             if (st.clock.active_id === id) return toast('这条正在台上，先熄灭或等它退场再删', 'warning');
             for (var i = 0; i < st.clues.length; i++) {
-                if (st.clues[i].id === id) {
-                    // 修正游标：删掉游标之前的已送线索时，游标同步左移
-                    if (i < st.clock.cursor) st.clock.cursor -= 1;
-                    st.clues.splice(i, 1);
-                    break;
-                }
+                if (st.clues[i].id === id) { st.clues.splice(i, 1); break; }
             }
+            st.clock.cursor = usedCount(st);
             saveStory();
             renderPanel();
         });
