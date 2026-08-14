@@ -262,3 +262,41 @@ body.reduced-motion .lcl2-firefly { animation: none; }
 .lcl2-model-row { display: flex; gap: 8px; }
 .lcl2-model-row input { flex: 1 1 auto; min-width: 0; }
 .lcl2-model-row .menu_button { flex: 0 0 auto; min-width: 0; white-space: nowrap; }
+
+/* ============ 自绘模型选择器（替代 iOS 上失灵的 datalist） ============ */
+.lcl2-picker {
+    position: absolute;
+    inset: 8%;
+    z-index: 30010;
+    display: flex;
+    flex-direction: column;
+    background: var(--SmartThemeBlurTintColor, rgba(14, 18, 26, 0.98));
+    border: 1px solid #e8a33d;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, .6);
+    overflow: hidden;
+}
+.lcl2-picker-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 60%, transparent);
+    flex: 0 0 auto;
+}
+.lcl2-picker-head input { flex: 1 1 auto; min-width: 0; }
+.lcl2-picker-list {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 4px 0;
+}
+.lcl2-picker-item {
+    padding: 10px 14px;
+    cursor: pointer;
+    font-size: .92em;
+    word-break: break-all;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #4a5568) 25%, transparent);
+}
+.lcl2-picker-item:active, .lcl2-picker-item:hover {
+    background: color-mix(in srgb, #e8a33d 16%, transparent);
+}

@@ -1544,10 +1544,9 @@
         '        <input id="lcl2_api_key" class="text_pole" type="password" placeholder="sk-...">' +
         '        <label class="lcl2-label">模型名</label>' +
         '        <div class="lcl2-model-row">' +
-        '          <input id="lcl2_api_model" class="text_pole" type="text" list="lcl2_models_dl" placeholder="例：deepseek-chat / claude-sonnet-4-6">' +
+        '          <input id="lcl2_api_model" class="text_pole" type="text" placeholder="例：deepseek-chat / claude-sonnet-4-6">' +
         '          <button id="lcl2_btn_models" class="menu_button" title="从 API 拉取可用模型列表">拉取模型</button>' +
         '        </div>' +
-        '        <datalist id="lcl2_models_dl"></datalist>' +
         '        <div class="lcl2-grid">' +
         '          <div><label class="lcl2-label">超时（秒）</label><input id="lcl2_api_timeout" class="text_pole" type="number" min="30" max="900"></div>' +
         '          <div><label class="lcl2-label">单批 max_tokens</label><input id="lcl2_api_maxtok" class="text_pole" type="number" min="500"></div>' +
@@ -1562,10 +1561,9 @@
         '        <input id="lcl2_api2_url" class="text_pole" type="text" placeholder="调度员 API 地址（可留空）">' +
         '        <input id="lcl2_api2_key" class="text_pole" type="password" placeholder="调度员密钥（可留空）" style="margin-top:6px">' +
         '        <div class="lcl2-model-row" style="margin-top:6px">' +
-        '          <input id="lcl2_api2_model" class="text_pole" type="text" list="lcl2_models2_dl" placeholder="调度员/God 模型名（可留空）">' +
+        '          <input id="lcl2_api2_model" class="text_pole" type="text" placeholder="调度员/God 模型名（可留空）">' +
         '          <button id="lcl2_btn_models2" class="menu_button" title="从调度员 API 拉取模型列表">拉取模型</button>' +
         '        </div>' +
-        '        <datalist id="lcl2_models2_dl"></datalist>' +
         '        <div class="lcl2-row">' +
         '          <button id="lcl2_btn_test2" class="menu_button">测试调度员</button>' +
         '          <span id="lcl2_test2_result" class="lcl2-dim"></span>' +
@@ -1604,17 +1602,46 @@
         $root.on('change input', '#lcl2_api_url, #lcl2_api_key, #lcl2_api_model, #lcl2_api_timeout, #lcl2_api_maxtok, #lcl2_use_tavern, #lcl2_depth, #lcl2_api2_url, #lcl2_api2_key, #lcl2_api2_model', function () {
             readFormIntoSettings();
         });
-        function fillDatalist(dlId, ids) {
-            var html = '';
-            for (var i = 0; i < ids.length; i++) html += '<option value="' + esc(ids[i]) + '">';
-            $('#' + dlId).html(html);
+        /* 自绘模型选择器：iOS WebView 不支持 datalist 下拉，只能自己画。
+         * 弹出带搜索过滤的列表浮层，点哪个填哪个。 */
+        function showModelPicker(targetSel, ids) {
+            closeModelPicker();
+            var html = '<div id="lcl2_picker" class="lcl2-picker">'
+                + '<div class="lcl2-picker-head">'
+                + '<input id="lcl2_picker_filter" class="text_pole" type="text" placeholder="输入过滤，共 ' + ids.length + ' 个模型">'
+                + '<span id="lcl2_picker_close" class="lcl2-close">✕</span>'
+                + '</div>'
+                + '<div id="lcl2_picker_list" class="lcl2-picker-list"></div>'
+                + '</div>';
+            $('#' + PANEL_ID).append(html);
+            function renderList(filter) {
+                var f = trim(filter).toLowerCase();
+                var out = '';
+                var shown = 0;
+                for (var i = 0; i < ids.length && shown < 200; i++) {
+                    if (f && ids[i].toLowerCase().indexOf(f) < 0) continue;
+                    out += '<div class="lcl2-picker-item" data-v="' + esc(ids[i]) + '">' + esc(ids[i]) + '</div>';
+                    shown++;
+                }
+                $('#lcl2_picker_list').html(out || '<div class="lcl2-dim" style="padding:8px">没有匹配的模型</div>');
+            }
+            renderList('');
+            $('#lcl2_picker_filter').on('input', function () { renderList($(this).val()); });
+            $('#lcl2_picker_close').on('click', closeModelPicker);
+            $('#lcl2_picker_list').on('click', '.lcl2-picker-item', function () {
+                $(targetSel).val($(this).attr('data-v'));
+                readFormIntoSettings();
+                closeModelPicker();
+                toast('已选择：' + $(this).attr('data-v'), 'success');
+            });
         }
+        function closeModelPicker() { $('#lcl2_picker').remove(); }
+
         $root.on('click', '#lcl2_btn_models', function () {
             var s = readFormIntoSettings();
             var $btn = $(this).prop('disabled', true).text('拉取中…');
             fetchModelList(s.api.url, s.api.key).then(function (ids) {
-                fillDatalist('lcl2_models_dl', ids);
-                toast('拉到 ' + ids.length + ' 个模型，点模型名输入框即可选择', 'success');
+                showModelPicker('#lcl2_api_model', ids);
             }).catch(function (err) {
                 toast('拉取失败：' + (err && err.message || err), 'error');
             }).then(function () { $btn.prop('disabled', false).text('拉取模型'); });
@@ -1625,8 +1652,7 @@
             var key = trim(s.api2.key) || s.api.key;
             var $btn = $(this).prop('disabled', true).text('拉取中…');
             fetchModelList(url, key).then(function (ids) {
-                fillDatalist('lcl2_models2_dl', ids);
-                toast('拉到 ' + ids.length + ' 个模型，点模型名输入框即可选择', 'success');
+                showModelPicker('#lcl2_api2_model', ids);
             }).catch(function (err) {
                 toast('拉取失败：' + (err && err.message || err), 'error');
             }).then(function () { $btn.prop('disabled', false).text('拉取模型'); });
