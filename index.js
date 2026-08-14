@@ -26,6 +26,10 @@
      * 1. 常量与小工具
      * ================================================================ */
 
+    /* 面板上显示的版本号。改版本时这里和 manifest.json 一起改——
+     * 界面上看得见版本，才能一眼确认新文件到底装上没有。 */
+    var VERSION = '2.5.3';
+
     var EXT_NAME = 'luciole_v2';
     var INJECT_KEY = 'luciole_v2_clue';
     var PANEL_ID = 'lcl2_panel';
@@ -1304,10 +1308,24 @@
     }
 
     /* 切换聊天：现场还原 */
+    /* 守卫自检报告：必须等到真有聊天账本可写才发得出去。
+     * 放在 boot() 里会被 log() 静默吞掉——那时候酒馆常常还没装载聊天。
+     * 每次刷新页面只报一次。 */
+    var guardReported = false;
+    function reportGuardOnce() {
+        if (guardReported) return;
+        if (!story()) return;          // 还没有账本，下次聊天切换时再报
+        guardReported = true;
+        var tk = chatToken();
+        if (tk) log('🛡 v' + VERSION + ' 已装载，串场守卫启用（聊天身份来源：' + chatTokenSource + '）。');
+        else log('⚠ v' + VERSION + ' 已装载，但串场守卫未启用：这个酒馆版本取不到聊天身份。行为与旧版一致，只是编译中途切聊天仍可能丢结果。');
+    }
+
     function onChatChanged() {
         clearInjection();  // 先清，防止上一个聊天的注入串场
         var st = story();
         if (!st) { renderPanel(); return; }
+        reportGuardOnce();
         if (st.status === 'lit') {
             var current = activeClue(st);
             if (current) {
@@ -1693,7 +1711,7 @@
         '<div id="' + PANEL_ID + '" class="lcl2-panel" style="display:none">' +
         '  <div class="lcl2-head">' +
         '    <b>🕯 小萤火 · 帷幕沙漏</b>' +
-        '    <span class="lcl2-head-ver">2.0</span>' +
+        '    <span class="lcl2-head-ver">' + VERSION + '</span>' +
         '    <span id="lcl2_close" class="lcl2-close" title="关闭">✕</span>' +
         '  </div>' +
         '  <div class="lcl2-body">' +
@@ -2022,7 +2040,7 @@
         if (!$host.length) return;
         $host.append(
             '<div id="lcl2_drawer" class="inline-drawer">' +
-            '  <div class="inline-drawer-toggle inline-drawer-header"><b>🕯 小萤火 2.0</b>' +
+            '  <div class="inline-drawer-toggle inline-drawer-header"><b>🕯 小萤火 ' + VERSION + '</b>' +
             '    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>' +
             '  <div class="inline-drawer-content"><div class="lcl2-drawer-inner">' +
             '    <button id="lcl2_open_panel" class="menu_button">打开小萤火面板</button>' +
@@ -2076,12 +2094,9 @@
         }
         bindChatEvents();
         clearInjection();     // 开机先清一次，防止上次会话残留
-        onChatChanged();      // 用现场还原逻辑完成首次装载
-        // 串场守卫自检：写进人话日志，手机上不用开控制台也能确认
-        var tk = chatToken();
-        if (tk) log('🛡 串场守卫已启用（聊天身份来源：' + chatTokenSource + '）。');
-        else log('⚠ 串场守卫未启用：这个酒馆版本取不到聊天身份。行为与旧版一致，但编译中途切聊天可能丢结果——请尽量等编译完再切。');
-        console.log('[Luciole 2.0] 小萤火已就位。守卫来源：' + (chatTokenSource || '无'));
+        onChatChanged();      // 用现场还原逻辑完成首次装载（内含守卫自检）
+        reportGuardOnce();    // 若开机时已有聊天，这里就报了；没有则等首次切换
+        console.log('[Luciole ' + VERSION + '] 小萤火已就位。守卫来源：' + (chatToken() ? chatTokenSource : '无'));
     }
 
     if (document.readyState === 'loading') {
