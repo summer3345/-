@@ -28,7 +28,7 @@
 
     /* 面板上显示的版本号。改版本时这里和 manifest.json 一起改——
      * 界面上看得见版本，才能一眼确认新文件到底装上没有。 */
-    var VERSION = '2.6.2';
+    var VERSION = '2.7.0';
 
     var EXT_NAME = 'luciole_v2';
     var INJECT_KEY = 'luciole_v2_clue';
@@ -147,7 +147,10 @@
             theme: 'night',        // night = 夜·萤火林 / day = 昼·呀哈哈林
             api2: { url: '', key: '', model: '' },  // 调度员连接（智能调度用；留空复用编译连接）
             ctx_strip: 'thinking, think, cot, reasoning, thought, plan, 思考, 思维链',  // 读上下文时剔除的标签块
-            ctx_prefer: ''          // 若填写：楼层中含任一此类标签块时，只取块内文本（如 正文, summary）
+            ctx_prefer: '',         // 若填写：楼层中含任一此类标签块时，只取块内文本（如 正文, summary）
+            // 提示词预设：全局共用。'builtin' 是保留名，永远等于代码默认值，改不动也删不掉——
+            // 随时有个干净的参照可比对。用户改的都是副本。
+            prompt_presets: { active: 'builtin', list: [] }
         };
     }
 
@@ -163,6 +166,9 @@
         for (k in d.api) if (s.api[k] === undefined) s.api[k] = d.api[k];
         for (k in d.api2) if (s.api2[k] === undefined) s.api2[k] = d.api2[k];
         for (k in d) if (s[k] === undefined) s[k] = d[k];
+        if (!isObject(s.prompt_presets)) s.prompt_presets = d.prompt_presets;
+        if (!isArray(s.prompt_presets.list)) s.prompt_presets.list = [];
+        if (!s.prompt_presets.active) s.prompt_presets.active = 'builtin';
         return s;
     }
 
@@ -185,7 +191,8 @@
                 clue_count: 10,
                 intensity: 'standard', // gentle | standard | clear
                 author_mode: true,
-                run_mode: 'uniform'    // uniform | smart（AI 监督为 Phase 3）
+                run_mode: 'uniform',   // uniform | smart | supervise
+                prompt_preset: ''      // '' = 跟随全局当前选中；填 id = 本故事固定用这套
             },
             clues: [],                 // { id, text, used, delivered_count }
             clock: {
@@ -703,14 +710,18 @@
      *  分批生成 + 草稿续跑 + 本地安检。
      * ================================================================ */
 
-    var INTENSITY_TEXT = {
-        gentle: '轻柔：只投气味、光线、旧物、迟疑的语气这类环境迹象；绝不解释含义，让玩家自己起疑。',
-        standard: '标准：具体可感的迹象——一件反常的小物、一句欲言又止的话、一处对不上的细节；可以引起注意，但不给出解释。',
-        clear: '清晰：明确可追查的证据或直白的反常行为；玩家能据此提出具体疑问，但线索本身仍不说破真相。'
-    };
+    /* ================================================================
+     * 提示词：可编辑的「怎么写」 + 代码接管的「怎么交货」
+     *
+     *  分开的理由：格式契约是解析器的依赖（JSON 形状 / 编号行 / HOLD），
+     *  被误删会导致静默失败，而报错长得像模型抽风，极难查。
+     *  所以契约永远由代码追加，不进编辑框。
+     *
+     *  占位符：{{力度}} {{禁词}}（编译 / God）、{{线索}}（注入模板）
+     * ================================================================ */
 
-    function compilerSystemPrompt(st) {
-        return [
+    var BUILTIN_PROMPTS = {
+        compiler: [
             '你是一位隐藏叙事的编剧助手。用户会给你一个「完整秘密」——它是一个角色扮演故事里被藏起来的真相脉络。',
             '你的任务：把通往真相的路，拆成一串按顺序投放的「线索」。',
             '',
@@ -720,12 +731,134 @@
             '3. 每条线索是写给"扮演角色的演员"看的舞台指示，告诉演员这一幕可以自然带出什么迹象。用第二人称祈使或描述句，例如"让她整理旧物时，一枚不属于这个家的袖扣从抽屉深处滚出来"。',
             '4. 线索必须扎根于给定的角色与世界环境，用其中真实存在的地点、物件、习俗和人物关系做载体。',
             '5. 每条线索 30～80 字。不要编号，不要解释，不要出现"线索""秘密""真相"这些出戏的词。',
-            '6. 力度要求——' + (INTENSITY_TEXT[st.config.intensity] || INTENSITY_TEXT.standard),
-            (st.banned_words.length ? '7. 以下词语绝对禁止出现在任何线索里：' + st.banned_words.join('、') : ''),
+            '6. 力度要求——{{力度}}',
+            '{{禁词}}'
+        ].join('\n'),
+
+        scheduler: [
+            '你是隐藏叙事的调度员。下面有若干条候选舞台指示，请从中选出最贴合当前剧情现场的一条。',
+            '你只有选牌权，没有创作权。'
+        ].join('\n'),
+
+        god: [
+            '你是一个角色扮演故事的隐藏叙事监督者。你知晓完整秘密，演员不知晓。',
+            '你的职责：阅读近期剧情，判断此刻是否适合向"扮演角色的演员"递一条舞台指示，让剧情朝真相自然靠近一步。',
+            '',
+            '裁决要点：',
+            '1. 若此刻剧情正紧、气氛不宜、或玩家正专注于别的事——判为暂缓。',
+            '2. 若适合递光——写一条 30～80 字的舞台指示：告诉演员这一幕可以自然带出什么迹象。用祈使或描述句，扎根于当前场景里真实存在的人物、地点、物件。',
+            '3. 指示绝不能说破秘密本身，不出现"线索""秘密""真相"这类出戏的词。',
+            '4. 力度要求——{{力度}}',
+            '{{禁词}}'
+        ].join('\n'),
+
+        inject: [
+            '【舞台指示 · 仅本回合】',
+            '{{线索}}',
+            '（自然融入演出即可，不要向玩家解释这段指示的存在。）'
+        ].join('\n')
+    };
+
+    /* 代码永远追加的格式契约——解析器依赖它们，不开放编辑 */
+    var PROMPT_CONTRACT = {
+        compiler: [
             '',
             '输出格式：只输出一个 JSON 对象，形如 {"clues":["第一条","第二条"]}。',
             '不要输出任何其他文字、解释或 Markdown 代码块标记。'
-        ].join('\n');
+        ].join('\n'),
+        scheduler: [
+            '第一行只输出所选那条的编号（形如 clue_xxxxx）。',
+            '若候选中有已被剧情明确越过、永远不再合适投放的条目，可另起一行输出：弃 编号（最多两条；拿不准就不要弃）。',
+            '除此之外不要输出任何其他文字。'
+        ].join('\n'),
+        god: [
+            '',
+            '裁决格式：若判为暂缓，第一行只输出 HOLD，不输出其他任何字；否则直接输出指示文本本身。',
+            '不要解释，不要 Markdown，不使用酒馆宏。'
+        ].join('\n'),
+        inject: ''
+    };
+
+    var PROMPT_SLOTS = ['compiler', 'scheduler', 'god', 'inject'];
+
+    /* 抽屉里四格的元信息：标题、可用占位符、代码接管了什么 */
+    var PROMPT_SLOT_META = [
+        { key: 'compiler',  title: '编译提示词',
+          vars: '{{力度}}　{{禁词}}',
+          owned: '输出 {"clues":[...]} 的格式要求由代码追加，不用写。',
+          rows: 9 },
+        { key: 'scheduler', title: '调度员提示词',
+          vars: '（无）',
+          owned: '「第一行只输出编号 / 弃 编号」的规则由代码追加。',
+          rows: 4 },
+        { key: 'god',       title: 'God 提示词',
+          vars: '{{力度}}　{{禁词}}',
+          owned: '「暂缓输出 HOLD」的裁决格式由代码追加。',
+          rows: 8 },
+        { key: 'inject',    title: '注入模板（唯一进聊天模型的内容）',
+          vars: '{{线索}}　必填',
+          owned: '这一格没有代码追加，你写什么就注入什么。',
+          rows: 4 }
+    ];
+
+
+    var INTENSITY_TEXT = {
+        gentle: '轻柔：只投气味、光线、旧物、迟疑的语气这类环境迹象；绝不解释含义，让玩家自己起疑。',
+        standard: '标准：具体可感的迹象——一件反常的小物、一句欲言又止的话、一处对不上的细节；可以引起注意，但不给出解释。',
+        clear: '清晰：明确可追查的证据或直白的反常行为；玩家能据此提出具体疑问，但线索本身仍不说破真相。'
+    };
+
+    /* ---- 提示词预设：查找 / 解析 / 变量替换 ---- */
+
+    function presetList() { return settings().prompt_presets.list; }
+
+    function findPreset(id) {
+        if (!id || id === 'builtin') return null;
+        var list = presetList();
+        for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+        return null;
+    }
+
+    /* 本次调用该用哪套：故事锁定优先，其次全局选中，都找不到就回内置。
+     * 「找不到就回内置」很关键——用户删掉了某个故事正在用的预设时，
+     * 故事不会因此跑不动，只是换回默认腔调。 */
+    function activePresetFor(st) {
+        var pinned = st && st.config && st.config.prompt_preset;
+        return findPreset(pinned) || findPreset(settings().prompt_presets.active) || null;
+    }
+
+    function promptText(slot, st) {
+        var preset = activePresetFor(st);
+        var body = preset && typeof preset[slot] === 'string' && trim(preset[slot])
+            ? preset[slot] : BUILTIN_PROMPTS[slot];
+        return body;
+    }
+
+    /* 占位符替换。{{禁词}} 在没有禁词时展开为空串，
+     * 随后把连续空行收成一个，免得留下突兀的空档。 */
+    function fillPromptVars(text, st, extra) {
+        var out = String(text || '');
+        var intensity = INTENSITY_TEXT[st && st.config && st.config.intensity] || INTENSITY_TEXT.standard;
+        var banned = (st && st.banned_words && st.banned_words.length)
+            ? '禁词：以下词语绝对禁止出现——' + st.banned_words.join('、') : '';
+        out = out.replace(/\{\{力度\}\}/g, intensity).replace(/\{\{禁词\}\}/g, banned);
+        if (extra) {
+            for (var k in extra) {
+                out = out.split('{{' + k + '}}').join(extra[k]);
+            }
+        }
+        return out.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+$/gm, '');
+    }
+
+    /* 最终提示词 = 可编辑正文（变量已替换） + 代码接管的格式契约 */
+    function buildPrompt(slot, st, extra) {
+        var body = fillPromptVars(promptText(slot, st), st, extra);
+        var contract = PROMPT_CONTRACT[slot] || '';
+        return contract ? (trim(body) + '\n' + contract) : body;
+    }
+
+    function compilerSystemPrompt(st) {
+        return buildPrompt('compiler', st);
     }
 
     function compilerUserPrompt(st, materials, batchCount, existingClues) {
@@ -972,12 +1105,15 @@
     }
 
     function injectText(clueText) {
-        var text = [
-            '【舞台指示 · 仅本回合】',
-            clueText,
-            '（自然融入演出即可，不要向玩家解释这段指示的存在。）'
-        ].join('\n');
-        // 末道闸：注入前最后一次宏检查
+        var st = story();
+        var tpl = promptText('inject', st);
+        // 模板里没有 {{线索}} 就等于空注入——保存时已拦，这里是最后一道保险
+        if (tpl.indexOf('{{线索}}') < 0) {
+            log('⚠ 注入模板里没有 {{线索}}，本条改用内置模板送出。');
+            tpl = BUILTIN_PROMPTS.inject;
+        }
+        var text = fillPromptVars(tpl, st, { '线索': clueText });
+        // 末道闸：替换之后仍有 {{...}} 说明模板里有写错的占位符，宁可空注入也不冒二次展开的险
         if (hasResidualMacro(text)) {
             log('⚠ 注入前发现残留宏，本条已拦下改为空注入。');
             text = '';
@@ -1119,7 +1255,7 @@
             if (pool.length <= 1) return;                     // 0/1 条无需选牌
             var window_ = pool.slice(0, 5);                   // 候选窗口：未用池头 5 条，保持大体递进
             var recent = recentStoryText(10, 3000);
-            planFlight = callSchedulerApi(schedulerSystemPrompt(), schedulerUserPrompt(recent.text, window_))
+            planFlight = callSchedulerApi(schedulerSystemPrompt(st), schedulerUserPrompt(recent.text, window_))
                 .then(function (raw) {
                     if (chatChangedSince(homeToken)) return;  // 人已经走了：这份结果作废，绝不写进别的聊天
                     var picked = matchClueIdInText(raw, window_);
@@ -1186,19 +1322,7 @@
     /* ---- AI 监督：God 提示词与裁决解析 ---- */
 
     function godSystemPrompt(st) {
-        return [
-            '你是一个角色扮演故事的隐藏叙事监督者。你知晓完整秘密，演员不知晓。',
-            '你的职责：阅读近期剧情，判断此刻是否适合向"扮演角色的演员"递一条舞台指示，让剧情朝真相自然靠近一步。',
-            '',
-            '裁决规则：',
-            '1. 若此刻剧情正紧、气氛不宜、或玩家正专注于别的事——第一行只输出 HOLD，不输出其他任何字。',
-            '2. 若适合递光——直接输出一条 30～80 字的舞台指示：告诉演员这一幕可以自然带出什么迹象。用祈使或描述句，扎根于当前场景里真实存在的人物、地点、物件。',
-            '3. 指示绝不能说破秘密本身，不出现"线索""秘密""真相"这类出戏的词，不使用 {{ }} 宏。',
-            '4. 力度要求——' + (INTENSITY_TEXT[st.config.intensity] || INTENSITY_TEXT.standard),
-            (st.banned_words.length ? '5. 以下词语绝对禁止出现：' + st.banned_words.join('、') : ''),
-            '',
-            '只输出 HOLD 或指示文本本身，不要解释，不要 Markdown。'
-        ].join('\n');
+        return buildPrompt('god', st);
     }
 
     function godUserPrompt(st, recentText, givenList) {
@@ -1223,14 +1347,8 @@
         return { hold: false, text: vetted.pass[0] };
     }
 
-    function schedulerSystemPrompt() {
-        return [
-            '你是隐藏叙事的调度员。下面有若干条候选舞台指示，请从中选出最贴合当前剧情现场的一条。',
-            '你只有选牌权，没有创作权。',
-            '第一行只输出所选那条的编号（形如 clue_xxxxx）。',
-            '若候选中有已被剧情明确越过、永远不再合适投放的条目，可另起一行输出：弃 编号（最多两条；拿不准就不要弃）。',
-            '除此之外不要输出任何其他文字。'
-        ].join('\n');
+    function schedulerSystemPrompt(st) {
+        return buildPrompt('scheduler', st);
     }
 
     function schedulerUserPrompt(recentText, candidates) {
@@ -1574,6 +1692,7 @@
         $('#lcl2_use_tavern').prop('checked', !!s.use_tavern);
 
         renderClueList();
+        renderPromptDrawer();
         renderLog();
         renderButtons();
     }
@@ -1627,6 +1746,69 @@
                 + '</div>';
         }
         $list.html(html);
+    }
+
+
+    /* ---- 提示词抽屉：渲染 ---- */
+
+    var promptSlotsDirty = false;
+
+    function renderPromptDrawer(force) {
+        var $wrap = $('#lcl2_prompt_slots');
+        if (!$wrap.length) return;
+        var st = story();
+        var s = settings();
+        var pinned = st && st.config.prompt_preset;
+        var effective = activePresetFor(st);
+        var isBuiltin = !effective;
+
+        // 预设下拉
+        var $sel = $('#lcl2_preset_sel');
+        if ($sel.length && !$sel.is(':focus')) {
+            var opts = '<option value="builtin">内置（不可改）</option>';
+            var list = presetList();
+            for (var i = 0; i < list.length; i++) {
+                opts += '<option value="' + esc(list[i].id) + '">' + esc(list[i].name) + '</option>';
+            }
+            $sel.html(opts).val(s.prompt_presets.active);
+        }
+        $('#lcl2_preset_pin').prop('checked', !!pinned).prop('disabled', !st);
+        $('#lcl2_preset_del').prop('disabled', isBuiltin);
+        $('#lcl2_preset_rename').prop('disabled', isBuiltin);
+
+        var note;
+        if (pinned && findPreset(pinned)) {
+            note = '这个故事固定用「' + findPreset(pinned).name + '」，不受上面的全局选择影响。';
+        } else if (pinned) {
+            note = '这个故事原本固定的预设已被删除，已自动回到内置。';
+        } else if (isBuiltin) {
+            note = '内置是永远干净的参照，改不动。想改就点「新建副本」。';
+        } else {
+            note = '正在编辑「' + effective.name + '」。改动立即生效于之后的编译与 God 裁决——已编译好的线索不会变，想让新腔调生效需要重新编译。';
+        }
+        $('#lcl2_preset_note').text(note);
+
+        // 打字期间不重建（与线索列表同一套纪律）
+        if (!force && $wrap.find('textarea:focus').length) { promptSlotsDirty = true; return; }
+        promptSlotsDirty = false;
+
+        var html = '';
+        for (var m = 0; m < PROMPT_SLOT_META.length; m++) {
+            var meta = PROMPT_SLOT_META[m];
+            var val = effective && typeof effective[meta.key] === 'string'
+                ? effective[meta.key] : BUILTIN_PROMPTS[meta.key];
+            var changed = effective && trim(val) !== trim(BUILTIN_PROMPTS[meta.key]);
+            html += '<div class="lcl2-slot" data-slot="' + meta.key + '">'
+                + '<div class="lcl2-slot-head">'
+                + '<span>' + esc(meta.title) + (changed ? '<span class="lcl2-slot-dot" title="已改过">●</span>' : '') + '</span>'
+                + (isBuiltin ? '' : '<span class="lcl2-slot-reset" title="把这一格还原成内置">还原</span>')
+                + '</div>'
+                + '<textarea class="lcl2-slot-text text_pole" rows="' + meta.rows + '"'
+                + (isBuiltin ? ' readonly' : '') + '>' + esc(val) + '</textarea>'
+                + '<div class="lcl2-dim lcl2-slot-hint">占位符：' + esc(meta.vars) + '<br>' + esc(meta.owned) + '</div>'
+                + '</div>';
+        }
+        $wrap.html(html);
     }
 
     var clueListDirty = false;   // 因用户正在打字而跳过的重建，失焦后补上
@@ -1818,7 +2000,19 @@
         '        <input id="lcl2_ctx_prefer" class="text_pole" type="text" placeholder="例：正文, summary">' +
         '      </details>' +
 
-        '      <details class="lcl2-sec"><summary>⑤ 日志</summary>' +
+        '      <details class="lcl2-sec"><summary>⑤ 提示词（进阶 · 不改也能用）</summary>' +
+        '        <div class="lcl2-row lcl2-preset-row">' +
+        '          <select id="lcl2_preset_sel" class="text_pole"></select>' +
+        '          <button id="lcl2_preset_new" class="menu_button" title="从当前这套复制一份出来改">新建副本</button>' +
+        '          <button id="lcl2_preset_rename" class="menu_button">重命名</button>' +
+        '          <button id="lcl2_preset_del" class="menu_button lcl2-danger">删除</button>' +
+        '        </div>' +
+        '        <label class="lcl2-check"><input type="checkbox" id="lcl2_preset_pin"> 本故事固定用这套（不勾就跟随上面的全局选择）</label>' +
+        '        <div id="lcl2_preset_note" class="lcl2-dim"></div>' +
+        '        <div id="lcl2_prompt_slots"></div>' +
+        '      </details>' +
+
+        '      <details class="lcl2-sec"><summary>⑥ 日志</summary>' +
         '        <div id="lcl2_log" class="lcl2-log"></div>' +
         '      </details>' +
 
@@ -1988,6 +2182,114 @@
                 if (clueListDirty && !$('#lcl2_clues').find('textarea:focus').length) renderClueList(true);
             }, 0);
         });
+
+        /* ---- 提示词预设 ---- */
+
+        $root.on('change', '#lcl2_preset_sel', function () {
+            settings().prompt_presets.active = String($(this).val() || 'builtin');
+            saveSettings();
+            renderPromptDrawer(true);
+        });
+
+        $root.on('click', '#lcl2_preset_new', function () {
+            var st = story();
+            var src = activePresetFor(st);
+            var base = src ? src.name : '内置';
+            var name = window.prompt('新预设叫什么？（从「' + base + '」复制一份）', base + ' 副本');
+            if (name === null) return;
+            name = trim(name) || (base + ' 副本');
+            var fresh = { id: uid('pp'), name: name };
+            for (var i = 0; i < PROMPT_SLOTS.length; i++) {
+                var k = PROMPT_SLOTS[i];
+                fresh[k] = (src && typeof src[k] === 'string') ? src[k] : BUILTIN_PROMPTS[k];
+            }
+            presetList().push(fresh);
+            settings().prompt_presets.active = fresh.id;
+            saveSettings();
+            toast('已新建「' + name + '」，现在可以改了', 'success');
+            renderPromptDrawer(true);
+        });
+
+        $root.on('click', '#lcl2_preset_rename', function () {
+            var cur = activePresetFor(story());
+            if (!cur) return;
+            var name = window.prompt('改成什么名字？', cur.name);
+            if (name === null) return;
+            cur.name = trim(name) || cur.name;
+            saveSettings();
+            renderPromptDrawer(true);
+        });
+
+        $root.on('click', '#lcl2_preset_del', function () {
+            var cur = activePresetFor(story());
+            if (!cur) return;
+            if (!window.confirm('删除预设「' + cur.name + '」？固定用它的故事会自动回到内置。')) return;
+            var list = presetList();
+            for (var i = 0; i < list.length; i++) {
+                if (list[i].id === cur.id) { list.splice(i, 1); break; }
+            }
+            settings().prompt_presets.active = 'builtin';
+            var st = story();
+            if (st && st.config.prompt_preset === cur.id) { st.config.prompt_preset = ''; saveStory(); }
+            saveSettings();
+            toast('已删除', 'info');
+            renderPromptDrawer(true);
+        });
+
+        $root.on('change', '#lcl2_preset_pin', function () {
+            var st = story();
+            if (!st) return;
+            if ($(this).prop('checked')) {
+                var cur = activePresetFor(st);
+                if (!cur) {
+                    $(this).prop('checked', false);
+                    return toast('内置是默认腔调，不需要固定——想固定先新建一个副本', 'info');
+                }
+                st.config.prompt_preset = cur.id;
+                log('本故事已固定使用提示词预设「' + cur.name + '」。');
+            } else {
+                st.config.prompt_preset = '';
+                log('本故事的提示词预设改回跟随全局。');
+            }
+            saveStory();
+            renderPromptDrawer(true);
+        });
+
+        $root.on('change', '.lcl2-slot-text', function () {
+            var cur = activePresetFor(story());
+            if (!cur) return;   // 内置只读
+            var slot = $(this).closest('.lcl2-slot').data('slot');
+            var val = String($(this).val() || '');
+            // 注入模板缺 {{线索}} 等于空注入，故事照跑但一条都送不出去——这种坑必须拦
+            if (slot === 'inject' && val.indexOf('{{线索}}') < 0) {
+                toast('注入模板必须包含 {{线索}}，否则线索送不出去。已还原这一格。', 'warning');
+                $(this).val(cur.inject || BUILTIN_PROMPTS.inject);
+                return;
+            }
+            cur[slot] = val;
+            saveSettings();
+            if (slot === 'compiler' && val.indexOf('{{力度}}') < 0) {
+                toast('这一格删掉了 {{力度}}，「线索力度」下拉框对编译将不再起作用', 'info');
+            }
+            renderPromptDrawer(true);
+        });
+
+        $root.on('click', '.lcl2-slot-reset', function () {
+            var cur = activePresetFor(story());
+            if (!cur) return;
+            var slot = $(this).closest('.lcl2-slot').data('slot');
+            cur[slot] = BUILTIN_PROMPTS[slot];
+            saveSettings();
+            renderPromptDrawer(true);
+        });
+
+        // 打字期间被推迟的重建，失焦后补上
+        $root.on('blur', '.lcl2-slot-text', function () {
+            setTimeout(function () {
+                if (promptSlotsDirty && !$('#lcl2_prompt_slots').find('textarea:focus').length) renderPromptDrawer(true);
+            }, 0);
+        });
+
         $root.on('click', '.lcl2-clue-fire', function () {
             var id = $(this).closest('.lcl2-clue').data('id');
             manualDispatch(id);

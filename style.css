@@ -315,45 +315,66 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: radial-gradient(circle, rgba(246, 236, 150, .14) 0%, rgba(166, 222, 88, .06) 42%, transparent 72%);
+    /* 大光晕搬到容器上，并且用 closest-side 让它在最近的边就褪成透明——
+     * 四角真正是空的，所以看起来永远是个圆，跟 border-radius 有没有被
+     * 别的插件盖掉完全无关。（避风塘的泊位制服会用 inline !important
+     * 改容器，圆角保不住，但渐变保得住。） */
+    background: radial-gradient(circle closest-side,
+        rgba(255, 252, 214, .78) 0%,
+        rgba(252, 242, 164, .60) 26%,
+        rgba(216, 240, 124, .38) 48%,
+        rgba(168, 218, 92, .18) 68%,
+        rgba(132, 192, 72, .06) 86%,
+        transparent 100%);
     user-select: none;
     -webkit-tap-highlight-color: transparent;
 }
 .lcl2-floater-fixed { position: fixed; right: 12px; bottom: 140px; }
 .lcl2-firefly {
     display: block;
-    width: 18px;
-    height: 18px;
+    /* 26px 不是随便定的：closest-side 的半径 = 边长的一半（13px），
+     * 刚好等于旧版 18px 盒子按最远角算出来的半径（12.7px）——
+     * 换算法之后视觉大小不变。 */
+    width: 26px;
+    height: 26px;
     border-radius: 50%;
     pointer-events: none;
-    background: radial-gradient(circle at 38% 32%,
-        rgba(255, 255, 246, 1) 0%,
-        rgba(255, 246, 186, .99) 16%,
-        rgba(244, 228, 128, .97) 32%,
-        rgba(206, 238, 116, .93) 50%,
-        rgba(146, 212, 70, .58) 68%,
-        rgba(90, 160, 46, .2) 84%,
-        transparent 100%);
-    box-shadow:
-        0 1px 2px rgba(10, 30, 10, .3),
-        0 0 5px 1px rgba(248, 238, 156, .85),
-        0 0 13px 4px rgba(186, 226, 96, .42),
-        0 0 30px 11px rgba(128, 186, 56, .16);
+    /* 两层：底层是 closest-side 的圆芯（四角透明，天然是圆的），
+     * 顶层是偏左上的小高光，像光源不在正中。
+     * 只留一圈很紧的外发光，即使被别人改方了也藏在圆芯底下看不见。 */
+    background:
+        radial-gradient(circle closest-side at 37% 31%,
+            rgba(255, 255, 252, .60) 0%,
+            rgba(255, 253, 226, .28) 26%,
+            rgba(255, 250, 210, .10) 46%,
+            transparent 68%),
+        radial-gradient(circle closest-side at 50% 50%,
+            rgba(255, 253, 232, 1) 0%,
+            rgba(253, 240, 152, 1) 22%,
+            rgba(238, 240, 126, .98) 40%,
+            rgba(198, 232, 104, .92) 58%,
+            rgba(150, 208, 72, .70) 74%,
+            rgba(104, 172, 52, .32) 88%,
+            transparent 100%);
+    /* 刻意不用 box-shadow：它跟着 border-radius 走，
+     * 一旦被别的插件改方，光晕就成了方的。发光全部交给上面的圆形渐变。 */
     animation: lcl2-breathe 3.6s ease-in-out infinite;
 }
 .lcl2-floater.lcl2-day .lcl2-firefly {
-    background: radial-gradient(circle at 38% 32%,
-        rgba(255, 255, 244, 1) 0%,
-        rgba(246, 252, 182, .98) 22%,
-        rgba(214, 242, 116, .94) 44%,
-        rgba(166, 216, 76, .6) 64%,
-        rgba(116, 172, 54, .2) 82%,
-        transparent 100%);
-    box-shadow:
-        0 1px 2px rgba(10, 30, 10, .26),
-        0 0 5px 1px rgba(232, 250, 158, .85),
-        0 0 13px 4px rgba(176, 226, 96, .4),
-        0 0 28px 10px rgba(128, 188, 60, .15);
+    background:
+        radial-gradient(circle closest-side at 37% 31%,
+            rgba(255, 255, 252, .62) 0%,
+            rgba(255, 254, 232, .28) 26%,
+            rgba(255, 252, 218, .10) 46%,
+            transparent 68%),
+        radial-gradient(circle closest-side at 50% 50%,
+            rgba(255, 255, 240, 1) 0%,
+            rgba(254, 246, 168, 1) 24%,
+            rgba(242, 246, 138, .98) 42%,
+            rgba(206, 236, 112, .92) 60%,
+            rgba(162, 214, 80, .68) 76%,
+            rgba(118, 178, 56, .30) 89%,
+            transparent 100%);
 }
 @keyframes lcl2-breathe {
     0%, 100% { transform: scale(1); opacity: .92; }
@@ -369,15 +390,20 @@ body.reduced-motion .lcl2-footer-fly { animation: none; }
 /* 避风塘停泊态：泊位制服把容器压成 20px 小条（inline !important），
  * 光点跟着收敛成 12px，光晕收拢，呼吸放慢——小小一颗，安静趴窝。 */
 #extensionHarborDock .lcl2-floater,
-#extensionHarborDock #lcl2_floater[data-harbor-parked="1"] {
-    background: transparent;
+.lcl2-floater[data-harbor-parked="1"] {
+    background: radial-gradient(circle closest-side,
+        rgba(255, 250, 205, .26) 0%,
+        rgba(246, 236, 150, .15) 30%,
+        rgba(186, 228, 110, .06) 58%,
+        transparent 100%);
+    border-radius: 50% !important;
 }
-#extensionHarborDock .lcl2-firefly {
-    width: 12px;
-    height: 12px;
-    box-shadow:
-        0 0 3px 1px rgba(214, 248, 138, .72),
-        0 0 7px 2px rgba(154, 218, 78, .3);
+#extensionHarborDock .lcl2-firefly,
+.lcl2-floater[data-harbor-parked="1"] .lcl2-firefly {
+    width: 16px;
+    height: 16px;
+    border-radius: 50% !important;
+    box-shadow: none !important;
     animation: lcl2-breathe 4.4s ease-in-out infinite;
 }
 
@@ -387,7 +413,7 @@ body.reduced-motion .lcl2-footer-fly { animation: none; }
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: radial-gradient(circle at 38% 32%, #fbf3b4 0%, #ddf07e 45%, #a8db54 100%);
+    background: radial-gradient(circle closest-side at 42% 34%, #fdf8c8 0%, #e6f28e 46%, #a8db54 100%);
     box-shadow: 0 0 6px 2px rgba(210, 232, 120, .5);
 }
 
@@ -545,4 +571,42 @@ body.reduced-motion .lcl2-footer-fly { animation: none; }
 .lcl2-clue-fire:active, .lcl2-clue-fire:hover {
     background: var(--lcl2-glow);
     color: var(--lcl2-on-glow);
+}
+
+/* ============ 提示词抽屉 ============ */
+.lcl2-preset-row { flex-wrap: nowrap; gap: 6px; }
+.lcl2-preset-row select { flex: 1 1 auto; min-width: 0; }
+.lcl2-preset-row .menu_button { flex: 0 0 auto; min-width: 0; white-space: nowrap; padding: 4px 8px; font-size: .86em; }
+.lcl2-check { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; font-size: .88em; }
+.lcl2-check input { flex: 0 0 auto; }
+
+.lcl2-slot { margin: 12px 0 0; }
+.lcl2-slot-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .88em;
+    font-weight: 600;
+    margin-bottom: 3px;
+}
+.lcl2-slot-dot { color: var(--lcl2-glow); margin-left: 5px; font-size: .8em; }
+.lcl2-slot-reset {
+    margin-left: auto;
+    cursor: pointer;
+    font-size: .82em;
+    font-weight: 400;
+    padding: 1px 7px;
+    border-radius: 8px;
+    background: var(--lcl2-tint);
+    border: 1px solid var(--lcl2-line-soft);
+}
+.lcl2-slot-reset:hover { border-color: var(--lcl2-glow); }
+.lcl2-slot-text { width: 100%; box-sizing: border-box; resize: vertical; font-size: .88em; line-height: 1.5; }
+.lcl2-slot-text[readonly] { opacity: .72; }
+.lcl2-slot-hint { margin-top: 3px; font-size: .8em; line-height: 1.45; }
+
+@media (max-width: 600px) {
+    .lcl2-preset-row { flex-wrap: wrap; }
+    .lcl2-preset-row select { flex: 1 1 100%; }
+    .lcl2-preset-row .menu_button { flex: 1 1 auto; }
 }
