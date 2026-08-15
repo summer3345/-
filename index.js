@@ -28,7 +28,7 @@
 
     /* 面板上显示的版本号。改版本时这里和 manifest.json 一起改——
      * 界面上看得见版本，才能一眼确认新文件到底装上没有。 */
-    var VERSION = '2.8.3';
+    var VERSION = '2.9.0';
 
     var EXT_NAME = 'luciole_v2';
     var INJECT_KEY = 'luciole_v2_clue';
@@ -205,12 +205,16 @@
                 intensity: 'standard', // gentle | standard | clear
                 author_mode: true,
                 run_mode: 'uniform',   // uniform | smart | supervise
+                order_mode: 'sequential',  // sequential 顺序 | tiered 分层洗牌 | random 纯随机
                 prompt_preset: ''      // '' = 跟随全局当前选中；填 id = 本故事固定用这套
             },
             clues: [],                 // { id, text, used, delivered_count }
             clock: {
                 round: 0,              // 相对轮：点亮 = 第 0 轮，此后每条玩家消息 +1
                 next_due: 1,           // 下一次投放的相对轮（点亮后第一条玩家消息即首个机会）
+                last_fire: 0,          // 上一次上台的轮数（改间隔时据此重算 next_due）
+                order: null,           // 发牌序（clue id 数组）。点亮时摇一次落盘——
+                                       // 绝不能每次现摇：重抽、回拨都会让顺序漂移，很难查
                 cursor: 0,             // 已送条数（派生自 used 计数）
                 active_id: null,       // 台上线索 id
                 planned: null,         // smart: {for_round, clue_id} / supervise: {for_round, god_text|hold}
@@ -875,20 +879,40 @@
         return buildPrompt('compiler', st);
     }
 
-    function compilerUserPrompt(st, materials, batchCount, existingClues) {
+    function compilerUserPrompt(st, materials, batchCount, existingClues, appendCtx) {
         var parts = [];
         parts.push('【完整秘密（绝密，仅你可见）】\n' + st.hidden_secret);
         if (materials.card) parts.push('【角色与开场设定（演员可见的公开信息）】\n' + materials.card);
         if (materials.world) parts.push('【世界环境素材（埋线索的土壤）】\n' + materials.world);
         if (materials.story) parts.push('【已有剧情（最近进展）】\n' + materials.story + '\n\n线索必须衔接以上现场：沿用已出现的人物、地点与正在进行的情节，不与已发生的事实矛盾，不重复已经被玩家注意到的迹象。');
-        if (existingClues.length) {
-            parts.push('【已定稿的前序线索（不要重复它们的意象和载体）】\n' +
-                existingClues.map(function (c, i) { return (i + 1) + '. ' + c; }).join('\n'));
-            parts.push('本批请续写第 ' + (existingClues.length + 1) + ' 条起的 ' + batchCount + ' 条，深度衔接前序、继续递进。');
-        } else {
-            parts.push('本批请生成最开始的 ' + batchCount + ' 条，从最浅的迹象起步。');
+        // 追加模式：池子里已有的线索按「已送出 / 还在排队」分开报——
+        // 已送出的玩家见过（绝不能重复），排队的玩家没见过（不能撞车），
+        // 两者对模型的意义不同，混成一坨它就分不清了。
+        if (appendCtx) {
+            if (appendCtx.sent.length) {
+                parts.push('【玩家已经见过的线索（这些迹象已经出现在故事里，绝不可重复）】\n' +
+                    appendCtx.sent.map(function (c, i) { return (i + 1) + '. ' + c; }).join('\n'));
+            }
+            if (appendCtx.pending.length) {
+                parts.push('【已备好但尚未投放的线索（玩家还没见过，新写的不要与它们撞意象、撞载体）】\n' +
+                    appendCtx.pending.map(function (c, i) { return (i + 1) + '. ' + c; }).join('\n'));
+            }
+            parts.push('【本次追加的额外要求（用户亲写，优先于一切默认倾向）】\n' +
+                (appendCtx.note || '（用户没有特别要求：请补写与现有线索同一层深度、可独立成立的新迹象，不要比现有最深的一条更接近真相。）'));
         }
-        parts.push('总计划共 ' + st.config.clue_count + ' 条，本批只写 ' + batchCount + ' 条。输出 {"clues":[...]}。');
+        if (existingClues.length) {
+            parts.push('【本次已写好的部分（同样不要重复）】\n' +
+                existingClues.map(function (c, i) { return (i + 1) + '. ' + c; }).join('\n'));
+            parts.push('本批请续写第 ' + (existingClues.length + 1) + ' 条起的 ' + batchCount + ' 条'
+                + (appendCtx ? '。' : '，深度衔接前序、继续递进。'));
+        } else {
+            parts.push(appendCtx
+                ? ('本批请写 ' + batchCount + ' 条新的。')
+                : ('本批请生成最开始的 ' + batchCount + ' 条，从最浅的迹象起步。'));
+        }
+        parts.push(appendCtx
+            ? ('本次共追加 ' + appendCtx.total + ' 条，本批只写 ' + batchCount + ' 条。输出 {"clues":[...]}。')
+            : ('总计划共 ' + st.config.clue_count + ' 条，本批只写 ' + batchCount + ' 条。输出 {"clues":[...]}。'));
         return parts.join('\n\n');
     }
 
@@ -951,28 +975,34 @@
 
     var compileState = { running: false, cancel: false };
 
-    function compileStory() {
+    function compileStory(opts) {
         var st = story();
+        var isAppend = !!(opts && opts.append);
         if (!st) return Promise.reject(new Error('请先打开一个聊天。'));
         if (compileState.running) return Promise.reject(new Error('编译正在进行中。'));
         if (!trim(st.hidden_secret)) return Promise.reject(new Error('隐藏脉络还是空的——先把秘密写给小萤火。'));
         if (st.config.run_mode === 'supervise') return Promise.reject(new Error('AI 监督模式不需要编译——写好秘密直接点亮即可。'));
-        if (st.status === 'lit') return Promise.reject(new Error('故事正在点亮中。请先熄灭，再重新编译。'));
+        // 追加允许在点亮状态下进行——正玩着想补货是常态，不该逼人先熄灭
+        if (!isAppend && st.status === 'lit') return Promise.reject(new Error('故事正在点亮中。请先熄灭，再重新编译。'));
 
-        var target = clamp(parseInt(st.config.clue_count, 10) || 10, 1, 200);
-        st.config.clue_count = target;
+        // 追加：只生成 addCount 条，现有的一条不动
+        var addCount = clamp(parseInt($('#lcl2_append_n').val(), 10) || 10, 1, 200);
+        var appendNote = trim($('#lcl2_append_note').val() || '');
+        var target = isAppend ? addCount : clamp(parseInt(st.config.clue_count, 10) || 10, 1, 200);
+        if (!isAppend) st.config.clue_count = target;
         var needRounds = target * clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
         var planRounds = clamp(parseInt(st.config.total_rounds, 10) || 100, 1, 9999);
-        if (needRounds > planRounds * 1.2) {
+        if (!isAppend && needRounds > planRounds * 1.2) {
             log('提示：' + target + ' 条 × 每 ' + st.config.interval + ' 轮一条 ≈ ' + needRounds + ' 轮才能送完，超出预计 ' + planRounds + ' 轮。想在预计轮数内送完可减少条数或缩短间隔（不强制，按你的节奏来）。');
         }
         var batchSize = clamp(parseInt(settings().batch_size, 10) || DEFAULT_BATCH, 1, 20);
 
         // 续跑：草稿里已有的定稿线索直接继承
+        var draftKey = isAppend ? 'draft_append' : 'draft';
         var doneClues = [];
-        if (st.draft && isArray(st.draft.clues) && st.draft.secret_hash === simpleHash(st.hidden_secret)) {
-            doneClues = st.draft.clues.slice();
-            log('发现上次未完成的草稿，从第 ' + (doneClues.length + 1) + ' 条继续。');
+        if (st[draftKey] && isArray(st[draftKey].clues) && st[draftKey].secret_hash === simpleHash(st.hidden_secret)) {
+            doneClues = st[draftKey].clues.slice();
+            log('发现上次未完成的' + (isAppend ? '追加' : '') + '草稿，从第 ' + (doneClues.length + 1) + ' 条继续。');
         }
 
         compileState.running = true;
@@ -1006,15 +1036,27 @@
             return runBatches();
         }).then(function () {
             assertHome();
-            st.clues = doneClues.map(function (text) {
+            var fresh = doneClues.map(function (text) {
                 return { id: uid('clue'), text: text, used: false, delivered_count: 0 };
             });
-            st.draft = null;
-            st.status = 'compiled';
-            st.clock = blankStory().clock;
-            saveStory();
-            log('编译完成：' + st.clues.length + ' 条线索已备好，等待你预览确认。');
-            toast('编译完成，' + st.clues.length + ' 条线索已备好', 'success');
+            if (isAppend) {
+                // 追加：现有线索、进度、轮钟一律不动，新的接到池子末尾
+                for (var a = 0; a < fresh.length; a++) st.clues.push(fresh[a]);
+                st.draft_append = null;
+                st.config.clue_count = st.clues.length;
+                appendToOrder(st, fresh);          // 随机/分层序要把新牌也收进去
+                saveStory();
+                log('追加完成：新增 ' + fresh.length + ' 条，池子现在共 ' + st.clues.length + ' 条（已送出的和进度都没动）。');
+                toast('已追加 ' + fresh.length + ' 条', 'success');
+            } else {
+                st.clues = fresh;
+                st.draft = null;
+                st.status = 'compiled';
+                st.clock = blankStory().clock;
+                saveStory();
+                log('编译完成：' + st.clues.length + ' 条线索已备好，等待你预览确认。');
+                toast('编译完成，' + st.clues.length + ' 条线索已备好', 'success');
+            }
             compileState.running = false;
             setCompileUi(false, '');
             renderPanel();
@@ -1030,15 +1072,26 @@
             }
             // 保草稿：已定稿部分不丢
             if (doneClues.length) {
-                st.draft = { clues: doneClues, secret_hash: simpleHash(st.hidden_secret) };
+                st[draftKey] = { clues: doneClues, secret_hash: simpleHash(st.hidden_secret) };
                 saveStory();
-                log('编译中断，已保住 ' + doneClues.length + ' 条草稿。修好问题后再点编译即可续跑。');
+                log((isAppend ? '追加' : '编译') + '中断，已保住 ' + doneClues.length + ' 条草稿。修好问题后再点一次即可续跑。');
             }
             log('✗ 编译失败：' + msg);
             toast('编译失败：' + msg, 'error');
             renderPanel();
             throw err;
         });
+
+        function appendCtx() {
+            if (!isAppend) return null;
+            var sent = [], pending = [];
+            for (var i = 0; i < st.clues.length; i++) {
+                var c = st.clues[i];
+                if (c.dropped) continue;                 // 弃掉的既没送出也不占位，不必报
+                (c.used ? sent : pending).push(c.text);
+            }
+            return { sent: sent, pending: pending, note: appendNote, total: addCount };
+        }
 
         function runBatches() {
             if (compileState.cancel) throw new Error('已手动停止。');
@@ -1062,7 +1115,7 @@
             return Promise.resolve().then(function () {
                 return callCompilerApi(
                     compilerSystemPrompt(st),
-                    compilerUserPrompt(st, materials, need, doneClues),
+                    compilerUserPrompt(st, materials, need, doneClues, appendCtx()),
                     function (chars) { setCompileUi(true, '模型书写中，已接收 ' + chars + ' 字……'); }
                 );
             }).then(function (raw) {
@@ -1125,6 +1178,65 @@
     /* 本轮该投哪条：
      * 均匀 → 未用池第一条（保持编译时的浅→深顺序）；
      * 智能 → 调度员预选的那条（若仍有效），否则确定性回退到未用池第一条。 */
+    /* ---- 发牌顺序 ----
+     * 顺序：编译时就是浅→深，直接按池子顺序发。
+     * 分层洗牌：切成前/中/后三段，段内随机、段间保序——
+     *           有意外感，又保住「越来越接近真相」的推进。
+     * 纯随机：彻底盲撒。会打掉浅→深的设计，配「同层线索」的编译提示词预设才好用。
+     */
+
+    function shuffled(arr) {
+        var a = arr.slice();
+        for (var i = a.length - 1; i > 0; i--) {
+            var j = Math.floor(Math.random() * (i + 1));
+            var t = a[i]; a[i] = a[j]; a[j] = t;
+        }
+        return a;
+    }
+
+    function orderIdsFor(mode, clues) {
+        var ids = clues.map(function (c) { return c.id; });
+        if (mode === 'random') return shuffled(ids);
+        if (mode === 'tiered') {
+            var n = ids.length;
+            if (n < 3) return shuffled(ids);
+            var a = Math.ceil(n / 3), b = Math.ceil((n * 2) / 3);
+            return shuffled(ids.slice(0, a))
+                .concat(shuffled(ids.slice(a, b)))
+                .concat(shuffled(ids.slice(b)));
+        }
+        return ids;
+    }
+
+    /* 点亮时定序。已经定过就不再动——中途改顺序模式不影响本局，
+     * 否则玩到一半换模式会让剩下的牌整个重排，体感像出 bug。 */
+    function buildOrder(st) {
+        var mode = st.config.order_mode || 'sequential';
+        st.clock.order = orderIdsFor(mode, st.clues);
+        return mode;
+    }
+
+    /* 追加进来的新牌要收进已有的序里：顺序档直接接尾，
+     * 随机/分层档在这批新牌内部洗一次再接尾——不重排老牌。 */
+    function appendToOrder(st, freshClues) {
+        if (!isArray(st.clock.order) || !st.clock.order.length) return;
+        var mode = st.config.order_mode || 'sequential';
+        var ids = freshClues.map(function (c) { return c.id; });
+        st.clock.order = st.clock.order.concat(mode === 'sequential' ? ids : shuffled(ids));
+    }
+
+    /* 按序取第一张还没用过的。序里找不到（老账本 / 新追加没入序）就退回池子顺序。 */
+    function firstByOrder(st, pool) {
+        var order = st.clock.order;
+        if (!isArray(order) || !order.length) return pool[0];
+        for (var i = 0; i < order.length; i++) {
+            for (var j = 0; j < pool.length; j++) {
+                if (pool[j].id === order[i]) return pool[j];
+            }
+        }
+        return pool[0];
+    }
+
     function pickClueForRound(st) {
         var pool = unusedClues(st);
         if (!pool.length) return null;
@@ -1135,11 +1247,11 @@
                 if (chosen && !chosen.used) return { clue: chosen, via: '调度员选牌' };
             }
             var why = '顺序发牌';
-            if (!plan) why = '调度未及完成，按顺序发牌';
-            else if (plan.failed) why = '调度没成，按顺序发牌';
-            return { clue: pool[0], via: why };
+            if (!plan) why = '调度未及完成，按既定顺序发牌';
+            else if (plan.failed) why = '调度没成，按既定顺序发牌';
+            return { clue: firstByOrder(st, pool), via: why };
         }
-        return { clue: pool[0], via: '' };
+        return { clue: firstByOrder(st, pool), via: '' };
     }
 
     function injectText(clueText) {
@@ -1206,6 +1318,7 @@
                     st.clock.planned = null;   // 预选一经消费即作废
                     next.delivered_count = 0;
                     injectText(next.text);
+                    st.clock.last_fire = st.clock.round;
                     st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
                     log('第 ' + st.clock.round + ' 轮：线索上台' + (picked.via ? '（' + picked.via + '）' : '') + '，将随下一次回复送出。');
                 }
@@ -1241,6 +1354,7 @@
             st.clock.active_id = clue.id;
             st.clock.hold_streak = 0;
             injectText(clue.text);
+            st.clock.last_fire = st.clock.round;
             st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
             log('第 ' + st.clock.round + ' 轮：God 递来一条现场设计的指示，将随下一次回复送出。');
         } else if (plan && plan.for_round === st.clock.round && plan.hold) {
@@ -1401,15 +1515,55 @@
 
     /* 解析器：直接在回话里搜候选 id 子串，出现位置最靠前者当选。
      * id 是随机串，不存在误匹配——这比让小模型写合法 JSON 可靠得多。 */
+    /* 调度员回话的识别，三层兜底。
+     *
+     * 便宜快模型经常「内容选对了、格式不对」——编号是随机串，对它毫无意义、
+     * 还容易抄错一位，于是它本能地改成复述内容。我们因为搜不到编号就整份扔掉，
+     * 太亏。所以编号搜不到时，再认序号、再认原文开头。
+     *
+     * 三层都靠位置最靠前者取胜，避免它先复述一堆再给答案时选错。 */
     function matchClueIdInText(rawText, candidates) {
         var text = String(rawText || '');
-        var best = null;
-        var bestPos = Infinity;
-        for (var i = 0; i < candidates.length; i++) {
-            var pos = text.indexOf(candidates[i].id);
+        var i, pos;
+
+        // 第一层：正经编号（最可靠）
+        var best = null, bestPos = Infinity;
+        for (i = 0; i < candidates.length; i++) {
+            pos = text.indexOf(candidates[i].id);
             if (pos >= 0 && pos < bestPos) { bestPos = pos; best = candidates[i]; }
         }
-        return best;
+        if (best) return best;
+
+        // 第二层：序号。「第2条」「2.」「选 2」「② 」等都认，只取 1..候选数
+        var head = text.slice(0, 200);   // 只在开头找，避免正文里的数字误伤
+        var circled = '①②③④⑤⑥⑦⑧⑨⑩';
+        var numBest = null, numPos = Infinity;
+        for (i = 0; i < candidates.length && i < 10; i++) {
+            var n = i + 1;
+            var pats = [
+                new RegExp('第\\s*' + n + '\\s*[条张个]'),
+                new RegExp('(^|[^0-9])' + n + '\\s*[.。、)）]'),
+                new RegExp('(选|挑|用|choose|pick)\\D{0,4}' + n + '(?![0-9])', 'i')
+            ];
+            var p2 = head.indexOf(circled.charAt(i));
+            if (p2 >= 0 && p2 < numPos) { numPos = p2; numBest = candidates[i]; }
+            for (var k = 0; k < pats.length; k++) {
+                var m = head.match(pats[k]);
+                if (m && m.index < numPos) { numPos = m.index; numBest = candidates[i]; }
+            }
+        }
+        if (numBest) return numBest;
+
+        // 第三层：它把线索原文复述了出来。取开头 10 字做指纹，够独特了
+        var txtBest = null, txtPos = Infinity;
+        for (i = 0; i < candidates.length; i++) {
+            var frag = trim(candidates[i].text).replace(/\s+/g, '').slice(0, 10);
+            if (frag.length < 6) continue;                    // 太短容易误伤
+            var flat = text.replace(/\s+/g, '');
+            pos = flat.indexOf(frag);
+            if (pos >= 0 && pos < txtPos) { txtPos = pos; txtBest = candidates[i]; }
+        }
+        return txtBest;
     }
 
     /* 废弃解析：只认以「弃 / DROP」开头的行，只认候选窗口内的 id，
@@ -1521,6 +1675,12 @@
             try { st.clock.lit_at_floor = (ctx().chat || []).length; } catch (e) { st.clock.lit_at_floor = 0; }
             st.clock.round = 0;
             st.clock.next_due = 1;   // 点亮后的第一条玩家消息即是第一次机会（宪法 5.4）
+            st.clock.last_fire = 0;
+            if (st.config.run_mode !== 'supervise') {
+                var om = buildOrder(st);   // 摇一次，落盘，本局不再变
+                log('发牌顺序已定：' + (om === 'random' ? '纯随机（盲撒）'
+                    : om === 'tiered' ? '分层洗牌（段内随机、段间保序）' : '按编译顺序（浅→深）'));
+            }
         }
         saveStory();
         log('🪇 故事点亮。你的下一次行动，就是第一束光的机会。');
@@ -1551,6 +1711,7 @@
         st.clock.planned = null;
         chosen.delivered_count = 0;
         injectText(chosen.text);
+        st.clock.last_fire = st.clock.round;
         st.clock.next_due = st.clock.round + clamp(parseInt(st.config.interval, 10) || 10, 1, 999);
         saveStory();
         log('手动加灯：一条线索' + (clueId ? '（你指定的）' : '') + '立即上台，将随下一次回复送出。后续排程从现在重新起算。');
@@ -1712,6 +1873,7 @@
             fillIfIdle('#lcl2_interval', st.config.interval);
             fillIfIdle('#lcl2_count', st.config.clue_count);
             $('#lcl2_intensity').val(st.config.intensity);
+            $('#lcl2_order').val(st.config.order_mode || 'sequential');
             $('input[name=lcl2_runmode][value="' + (st.config.run_mode || 'uniform') + '"]').prop('checked', true);
             $('#lcl2_author').prop('checked', !!st.config.author_mode);
         }
@@ -1747,6 +1909,10 @@
         var compiled = st && st.status === 'compiled';
         var busy = compileState.running;
         $('#lcl2_btn_compile').prop('disabled', busy || lit).toggle(!busy);
+        // 追加与编译不同：正点亮着也能补货，这才是它存在的理由
+        var canAppend = st && st.clues.length && !busy && st.config.run_mode !== 'supervise';
+        $('#lcl2_btn_append').prop('disabled', !canAppend);
+        $('.lcl2-append').toggle(!!(st && st.clues.length && st.config.run_mode !== 'supervise'));
         $('#lcl2_btn_stop').toggle(busy);
         $('#lcl2_btn_light').prop('disabled', !compiled || busy);
         $('#lcl2_btn_off').prop('disabled', !lit);
@@ -1780,6 +1946,8 @@
             html += '<div class="lcl2-clue" data-id="' + esc(clue.id) + '">'
                 + '<div class="lcl2-clue-head">#' + (j + 1) + ' ' + badge
                 + (canDispatch ? '<span class="lcl2-clue-fire" title="立即投放这条">🪇 投</span>' : '')
+                + '<span class="lcl2-clue-move" data-dir="-1" title="上移">↑</span>'
+                + '<span class="lcl2-clue-move" data-dir="1" title="下移">↓</span>'
                 + '<span class="lcl2-clue-del" title="删除这条">✕</span></div>'
                 + '<textarea class="lcl2-clue-text text_pole" rows="2">' + esc(clue.text) + '</textarea>'
                 + '</div>';
@@ -1935,10 +2103,21 @@
         st.hidden_secret = String($('#lcl2_secret').val() || '');
         st.banned_words = String($('#lcl2_banned').val() || '').split(/[,，\n]/).map(trim).filter(Boolean);
         st.config.total_rounds = clamp(parseInt($('#lcl2_total').val(), 10) || 100, 1, 9999);
+        var oldInterval = st.config.interval;
         st.config.interval = clamp(parseInt($('#lcl2_interval').val(), 10) || 10, 1, 999);
+        // 间隔一改就重算下一次上台，否则「我改了怎么没反应」——
+        // 但至少还要再等一条消息，绝不会一改就当场炸出来一条。
+        if (st.status === 'lit' && st.config.interval !== oldInterval && st.clock.last_fire > 0) {
+            var wantDue = Math.max(st.clock.round + 1, st.clock.last_fire + st.config.interval);
+            if (wantDue !== st.clock.next_due) {
+                st.clock.next_due = wantDue;
+                log('间隔改为每 ' + st.config.interval + ' 轮一条，下一条重算到第 ' + wantDue + ' 轮。');
+            }
+        }
         var manualCount = parseInt($('#lcl2_count').val(), 10);
         st.config.clue_count = clamp(manualCount || Math.ceil(st.config.total_rounds / st.config.interval), 1, 200);
         st.config.intensity = String($('#lcl2_intensity').val() || 'standard');
+        st.config.order_mode = String($('#lcl2_order').val() || 'sequential');
         var rm = String($('input[name=lcl2_runmode]:checked').val() || st.config.run_mode || 'uniform');
         if (rm === 'uniform' || rm === 'smart' || rm === 'supervise') st.config.run_mode = rm;
         st.config.author_mode = $('#lcl2_author').prop('checked');
@@ -2012,6 +2191,11 @@
         '          <div><label class="lcl2-label">预计总轮数</label><input id="lcl2_total" class="text_pole" type="number" min="1"></div>' +
         '          <div><label class="lcl2-label">每隔几轮一条</label><input id="lcl2_interval" class="text_pole" type="number" min="1"></div>' +
         '          <div><label class="lcl2-label">线索条数<small class="lcl2-dim">（建议多备些当余量）</small></label><input id="lcl2_count" class="text_pole" type="number" min="1" placeholder="自动"></div>' +
+        '          <div><label class="lcl2-label">发牌顺序</label><select id="lcl2_order" class="text_pole">' +
+        '            <option value="sequential">按编译顺序（浅→深）</option>' +
+        '            <option value="tiered">分层洗牌（段内随机）</option>' +
+        '            <option value="random">纯随机（盲撒）</option>' +
+        '          </select></div>' +
         '          <div><label class="lcl2-label">线索力度</label><select id="lcl2_intensity" class="text_pole">' +
         '            <option value="gentle">轻柔</option><option value="standard" selected>标准</option><option value="clear">清晰</option>' +
         '          </select></div>' +
@@ -2026,6 +2210,18 @@
         '        <div class="lcl2-row">' +
         '          <button id="lcl2_btn_compile" class="menu_button">✦ 编译</button>' +
         '          <button id="lcl2_btn_stop" class="menu_button" style="display:none">停止</button>' +
+        '        </div>' +
+        '        <details class="lcl2-sec lcl2-append"><summary>＋ 追加线索（不覆盖现有的）</summary>' +
+        '          <div class="lcl2-dim">现有线索和进度一条不动，只往池子末尾补新的。已送出的和还在排队的都会告诉小萤火，避免撞车。</div>' +
+        '          <label class="lcl2-label">追加几条</label>' +
+        '          <input id="lcl2_append_n" class="text_pole" type="number" min="1" max="200" value="10">' +
+        '          <label class="lcl2-label">本次追加的额外要求（可留空）</label>' +
+        '          <textarea id="lcl2_append_note" class="text_pole lcl2-secret" rows="3" placeholder="例：这批补在中段深度，别比现有最深的更接近真相；多写城南码头一带的迹象；不要再出现袖扣。"></textarea>' +
+        '          <div class="lcl2-row">' +
+        '            <button id="lcl2_btn_append" class="menu_button lcl2-manual">＋ 追加</button>' +
+        '          </div>' +
+        '        </details>' +
+        '        <div class="lcl2-row">' +
         '          <span id="lcl2_progress" class="lcl2-dim"></span>' +
         '        </div>' +
         '      </details>' +
@@ -2168,7 +2364,7 @@
         $root.on('click', '#lcl2_close', hidePanel);
         $root.on('click', '#lcl2_theme', toggleTheme);
 
-        $root.on('change input', '#lcl2_secret, #lcl2_banned, #lcl2_total, #lcl2_interval, #lcl2_count, #lcl2_intensity, #lcl2_author', function () {
+        $root.on('change input', '#lcl2_secret, #lcl2_banned, #lcl2_total, #lcl2_interval, #lcl2_count, #lcl2_intensity, #lcl2_order, #lcl2_author', function () {
             readFormIntoStory();
             if (this.id === 'lcl2_author') renderClueList();
         });
@@ -2248,8 +2444,24 @@
         $root.on('click', '#lcl2_btn_compile', function () {
             var st = readFormIntoStory();
             if (!st) return toast('请先打开一个聊天', 'warning');
+            // 覆盖是不可逆的：已有线索时必须确认，已经送出过的更要说清楚
+            if (st.clues.length) {
+                var sent = usedCount(st);
+                var warn = '重新编译会用新线索【覆盖】现有的 ' + st.clues.length + ' 条';
+                warn += sent ? ('（其中 ' + sent + ' 条已经送给玩家了，进度也会一起清零）') : '';
+                warn += '。\n\n想保留现有的、只补一批新的，请点「追加」。\n\n确定要覆盖吗？';
+                if (!window.confirm(warn)) return;
+            }
             readFormIntoSettings();
             compileStory().catch(function () { });
+        });
+
+        $root.on('click', '#lcl2_btn_append', function () {
+            var st = readFormIntoStory();
+            if (!st) return toast('请先打开一个聊天', 'warning');
+            if (!st.clues.length) return toast('还没有线索可追加，请先编译', 'warning');
+            readFormIntoSettings();
+            compileStory({ append: true }).catch(function () { });
         });
         $root.on('click', '#lcl2_btn_stop', function () {
             compileState.cancel = true;
@@ -2439,6 +2651,29 @@
             setTimeout(function () {
                 if (promptSlotsDirty && !$('#lcl2_prompt_slots').find('textarea:focus').length) renderPromptDrawer(true);
             }, 0);
+        });
+
+        /* 调序：池子顺序即发牌顺序（顺序档），也是分层洗牌的切段依据。
+         * 已送出的不参与调序——它已经在故事里了，挪位置没有意义还会让人误会。 */
+        $root.on('click', '.lcl2-clue-move', function () {
+            var st = story();
+            if (!st) return;
+            var id = $(this).closest('.lcl2-clue').data('id');
+            var dir = parseInt($(this).data('dir'), 10) || 0;
+            var from = -1, i;
+            for (i = 0; i < st.clues.length; i++) if (st.clues[i].id === id) { from = i; break; }
+            if (from < 0) return;
+            if (st.clues[from].used) return toast('已送出的线索不能挪位置', 'info');
+            var to = from + dir;
+            if (to < 0 || to >= st.clues.length) return;
+            if (st.clues[to].used) return toast('不能挪到已送出的线索之前', 'info');
+            var tmp = st.clues[from]; st.clues[from] = st.clues[to]; st.clues[to] = tmp;
+            // 顺序档的发牌序就是池子顺序，跟着一起换；随机/分层档的序是独立的，不动
+            if ((st.config.order_mode || 'sequential') === 'sequential' && isArray(st.clock.order)) {
+                st.clock.order = st.clues.map(function (c) { return c.id; });
+            }
+            saveStory();
+            renderClueList(true);
         });
 
         $root.on('click', '.lcl2-clue-fire', function () {

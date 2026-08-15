@@ -622,3 +622,18 @@ body.reduced-motion .lcl2-footer-fly { animation: none; }
 }
 .lcl2-star-wish { font-size: .92em; line-height: 1.5; margin-top: 2px; word-break: break-word; }
 .lcl2-star-status { margin: 4px 0 8px; line-height: 1.5; }
+
+/* ============ 追加区 / 线索调序 ============ */
+.lcl2-append { margin-top: 8px; }
+.lcl2-append > summary { font-size: .9em; }
+.lcl2-append input[type="number"] { width: 100%; box-sizing: border-box; }
+.lcl2-clue-move {
+    cursor: pointer;
+    opacity: .55;
+    padding: 0 5px;
+    font-size: .95em;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+.lcl2-clue-move:hover, .lcl2-clue-move:active { opacity: 1; color: var(--lcl2-glow); }
+.lcl2-clue-move[data-dir="-1"] { margin-left: auto; }
