@@ -28,11 +28,14 @@
 
     /* 面板上显示的版本号。改版本时这里和 manifest.json 一起改——
      * 界面上看得见版本，才能一眼确认新文件到底装上没有。 */
-    var VERSION = '2.9.0';
+    var VERSION = '3.0.0';
 
     var EXT_NAME = 'luciole_v2';
     var INJECT_KEY = 'luciole_v2_clue';
-    var INJECT_KEY_STAR = 'luciole_v2_star';   // 星星点灯独立注入通道，与线索并行不干扰
+    /* 三条注入通道，各管各的，绝不合并——
+     * 合并的话：正挂着幕本时按一下须知，就会把幕本冲掉。 */
+    var INJECT_KEY_ACT = 'luciole_v2_act';     // 第二幕 · 幕本（常驻）
+    var INJECT_KEY_BRIEF = 'luciole_v2_brief'; // 随身须知（一次性，手动）
     var WISH_OVERLAP_WINDOW = 6;               // 愿望原文指纹窗口（铁律1的机器实现）
     var STAR_MAX_PER_SIDE = 12;                // 亮星/暗星各自上限
     var PANEL_ID = 'lcl2_panel';
@@ -158,7 +161,9 @@
             batch_size: DEFAULT_BATCH,
             show_floater: true,    // 萤火虫浮标（可停进避风塘）
             theme: 'night',        // night = 夜·萤火林 / day = 昼·呀哈哈林
-            api2: { url: '', key: '', model: '' },  // 调度员连接（智能调度用；留空复用编译连接）
+            page: 'veil',          // 当前停在哪一幕的页：veil | act | mist
+            api2: { url: '', key: '', model: '' },   // 调度员 / God
+            api3: { url: '', key: '', model: '' },   // 星灯领航员（三项留空即复用编译连接）  // 调度员连接（智能调度用；留空复用编译连接）
             ctx_strip: 'thinking, think, cot, reasoning, thought, plan, 思考, 思维链',  // 读上下文时剔除的标签块
             ctx_prefer: '',         // 若填写：楼层中含任一此类标签块时，只取块内文本（如 正文, summary）
             // 提示词预设：全局共用。'builtin' 是保留名，永远等于代码默认值，改不动也删不掉——
@@ -258,11 +263,29 @@
         } catch (e) { }
     }
 
+    function pushLog(arr, msg) {
+        arr.push({ t: nowIso(), msg: String(msg) });
+        if (arr.length > LOG_LIMIT) arr.splice(0, arr.length - LOG_LIMIT);
+    }
+
+    // 第一幕 + 通用
     function log(msg) {
         var st = story();
         if (!st) return;
-        st.log.push({ t: nowIso(), msg: String(msg) });
-        if (st.log.length > LOG_LIMIT) st.log.splice(0, st.log.length - LOG_LIMIT);
+        pushLog(st.log, msg);
+        saveStory();
+        renderLogSoon();
+    }
+
+    // 不属于任何一幕的系统消息：两边各写一条
+    function sysLog(msg) {
+        var st = story();
+        if (!st) return;
+        pushLog(st.log, msg);
+        if (isObject(st.act_book)) {
+            if (!isArray(st.act_book.ledger)) st.act_book.ledger = [];
+            pushLog(st.act_book.ledger, msg);
+        }
         saveStory();
         renderLogSoon();
     }
@@ -1407,7 +1430,7 @@
             if (pool.length <= 1) return;                     // 0/1 条无需选牌
             var window_ = pool.slice(0, 5);                   // 候选窗口：未用池头 5 条，保持大体递进
             var recent = recentStoryText(10, 3000);
-            planFlight = callSchedulerApi(schedulerSystemPrompt(st), schedulerUserPrompt(recent.text, window_))
+            planFlight = callSmallApi('api2', '调度员', schedulerSystemPrompt(st), schedulerUserPrompt(recent.text, window_))
                 .then(function (raw) {
                     if (chatChangedSince(homeToken)) return;  // 人已经走了：这份结果作废，绝不写进别的聊天
                     var picked = matchClueIdInText(raw, window_);
@@ -1443,7 +1466,7 @@
         var recent2 = recentStoryText(12, 3500);
         var given = [];
         for (var g = Math.max(0, st.clues.length - 5); g < st.clues.length; g++) given.push(st.clues[g].text);
-        planFlight = callSchedulerApi(godSystemPrompt(st), godUserPrompt(st, recent2.text, given))
+        planFlight = callSmallApi('api2', 'God', godSystemPrompt(st), godUserPrompt(st, recent2.text, given))
             .then(function (raw) {
                 // 最要紧的一道：God 读的是这个聊天的秘密，落地时人若已走，整份作废。
                 if (chatChangedSince(homeToken)) return;
@@ -1583,16 +1606,28 @@
     }
 
     /* 调度员连接：独立配置，留空复用编译连接；小请求、零温度、短超时 */
-    function callSchedulerApi(systemPrompt, userPrompt) {
+    /* 公共小请求管道：不属于任何一幕，谁都能用。
+     * 这样第一幕整个搬走时，第二幕不会跟着断。
+     * profileKey 指哪份配置（'api2' 调度员 / 'api3' 星灯…），
+     * 三项留空一律回退编译连接——与④连接里既有的规矩一致。 */
+    function resolveProfile(profileKey, label) {
         var s = settings();
+        var own = s[profileKey] || {};
         var prof = {
-            url: trim(s.api2.url) || s.api.url,
-            key: trim(s.api2.key) || s.api.key,
-            model: trim(s.api2.model) || s.api.model
+            url: trim(own.url) || s.api.url,
+            key: trim(own.key) || s.api.key,
+            model: trim(own.model) || s.api.model
         };
         if (!trim(prof.url) || !trim(prof.model)) {
-            return Promise.reject(new Error('调度员连接未配置（也没有可复用的编译连接）'));
+            throw new Error(label + '连接未配置（也没有可复用的编译连接）');
         }
+        return prof;
+    }
+
+    function callSmallApi(profileKey, label, systemPrompt, userPrompt) {
+        var prof;
+        try { prof = resolveProfile(profileKey, label); }
+        catch (e) { return Promise.reject(e); }
         var controller = typeof AbortController === 'function' ? new AbortController() : null;
         var request = fetch(normalizeApiUrl(prof.url), {
             method: 'POST',
@@ -1628,8 +1663,8 @@
         if (!story()) return;          // 还没有账本，下次聊天切换时再报
         guardReported = true;
         var tk = chatToken();
-        if (tk) log('🛡 v' + VERSION + ' 已装载，串场守卫启用（聊天身份来源：' + chatTokenSource + '）。');
-        else log('⚠ v' + VERSION + ' 已装载，但串场守卫未启用：这个酒馆版本取不到聊天身份。行为与旧版一致，只是编译中途切聊天仍可能丢结果。');
+        if (tk) sysLog('🛡 v' + VERSION + ' 已装载，串场守卫启用（聊天身份来源：' + chatTokenSource + '）。');
+        else sysLog('⚠ v' + VERSION + ' 已装载，但串场守卫未启用：这个酒馆版本取不到聊天身份。行为与旧版一致，只是编译中途切聊天仍可能丢结果。');
     }
 
     function onChatChanged() {
@@ -1895,7 +1930,7 @@
         renderPromptDrawer();
         renderLog();
         renderButtons();
-        renderStarPanel();
+        renderActPanel();
     }
 
     function fillIfIdle(sel, value) {
@@ -2020,51 +2055,6 @@
 
     var clueListDirty = false;   // 因用户正在打字而跳过的重建，失焦后补上
 
-    function renderStarPanel() {
-        var $host = $('#lcl2_star_list');
-        if (!$host.length) return;
-        var sc = starChart();
-        if (!sc) { $host.html('<div class="lcl2-dim">（先打开一个聊天）</div>'); return; }
-        var counts = starCounts(sc);
-        var statusText;
-        if (!sc.locked) {
-            statusText = sc.stars.length
-                ? ('草稿：亮星 ' + counts.bright + ' · 暗星 ' + counts.dark + '。写好就「交给小萤火」。')
-                : '还没有星星。亮星写想去的方向，暗星写禁区——愿望原文永远不会被演员看到。';
-        } else if (sc.blind) {
-            statusText = '✨ 领航中（盲档）· 第 ' + sc.s_round + ' 轮 · 待点 ' + (counts.bright - counts.lit >= 0 ? countWaiting(sc) : 0) + ' 颗 · 已点亮 ' + counts.lit + ' 颗';
-        } else {
-            var eta = Math.max(0, sc.s_next_due - sc.s_round);
-            statusText = '✨ 领航中 · 第 ' + sc.s_round + ' 轮 · 已点亮 ' + counts.lit + ' 颗 · 下次抬头还差 ' + eta + ' 条消息'
-                + (sc.planned ? (sc.planned.kind === 'idle' ? ' · 领航员：顺其自然' : ' · 领航员已备好下一程') : '');
-        }
-        $('.lcl2-star-status').text(statusText);
-
-        var html = '';
-        for (var i = 0; i < sc.stars.length; i++) {
-            var s = sc.stars[i];
-            var icon = s.polarity === 'dark' ? '🌑' : '🌟';
-            var stateBadge = s.status === 'lit'
-                ? '<span class="lcl2-badge lcl2-badge-used">已点亮' + (sc.blind ? '' : (s.lit_round != null ? ' · 第' + s.lit_round + '轮' : '')) + '</span>'
-                : '<span class="lcl2-badge">待命</span>';
-            var wishShown = (sc.blind && sc.locked) ? '（盲档领航中，完结后复盘可见）' : esc(s.wish);
-            var dots = s.weight === 3 ? '●●●' : (s.weight === 1 ? '●' : '●●');
-            html += '<div class="lcl2-star" data-id="' + esc(s.id) + '">'
-                + '<div class="lcl2-clue-head">' + icon + ' ' + esc(s.id) + ' <span class="lcl2-dim">' + dots + '</span> ' + stateBadge
-                + (sc.locked ? '' : '<span class="lcl2-clue-del lcl2-star-del" title="摘下这颗星">✕</span>')
-                + '</div>'
-                + '<div class="lcl2-star-wish">' + wishShown + '</div>'
-                + '</div>';
-        }
-        $host.html(html || '<div class="lcl2-dim">（星图还空着）</div>');
-
-        fillIfIdle('#lcl2_star_interval', sc.interval);
-        $('#lcl2_star_blind').prop('checked', !!sc.blind);
-        $('#lcl2_star_lock').text(sc.locked ? '解锁星图' : '✨ 交给小萤火');
-        $('#lcl2_star_look').toggle(!!sc.locked);
-        var storyDone = (story() && story().status === 'finished');
-        $('#lcl2_star_reveal').toggle(!!(sc.blind && sc.locked && storyDone));
-    }
 
     function countWaiting(sc) {
         var n = 0;
@@ -2078,18 +2068,26 @@
         logRenderTimer = setTimeout(function () { logRenderTimer = null; renderLog(); }, 150);
     }
 
-    function renderLog() {
-        var $log = $('#lcl2_log');
+    function renderOneLog(sel, entries) {
+        var $log = $(sel);
         if (!$log.length) return;
-        var st = story();
-        if (!st || !st.log.length) { $log.html('<div class="lcl2-dim">（暂无记录）</div>'); return; }
+        if (!isArray(entries) || !entries.length) { $log.html('<div class="lcl2-dim">（暂无记录）</div>'); return; }
         var html = '';
-        for (var i = st.log.length - 1; i >= 0; i--) {
-            var e = st.log[i];
+        for (var i = entries.length - 1; i >= 0; i--) {
+            var e = entries[i];
             var time = String(e.t).slice(11, 19);
             html += '<div class="lcl2-log-line"><span class="lcl2-log-time">' + esc(time) + '</span>' + esc(e.msg) + '</div>';
         }
         $log.html(html);
+    }
+
+    /* 两幕各记各的流水。跨幕的系统消息（守卫自检、版本）两边都写一条——
+     * 它不属于任何一幕，但你在哪一页都该看得见。 */
+    function renderLog() {
+        var st = story();
+        renderOneLog('#lcl2_log', st && st.log);
+        var ab = st && isObject(st.act_book) ? st.act_book : null;
+        renderOneLog('#lcl2_act_log', ab && ab.ledger);
     }
 
     function setCompileUi(running, text) {
@@ -2171,9 +2169,9 @@
         '  <div class="lcl2-body">' +
 
         '      <div class="lcl2-mode-row">' +
-        '        <button class="lcl2-mode lcl2-mode-on">⏳ 帷幕沙漏<small>第一幕 · 进行中</small></button>' +
-        '        <button id="lcl2_mode_star" class="lcl2-mode">✨ 星星点灯<small>第二幕 · 已点亮</small></button>' +
-        '        <button class="lcl2-mode" disabled title="第三幕，敬请期待">🌫 迷雾森林<small>第三幕 · 敬请期待</small></button>' +
+        '        <button class="lcl2-mode lcl2-mode-on" data-page="veil">⏳ 帷幕沙漏<small>第一幕 · 藏信息</small></button>' +
+        '        <button class="lcl2-mode" data-page="act">✨ 星星点灯<small>第二幕 · 分镜成长</small></button>' +
+        '        <button class="lcl2-mode" data-page="mist" disabled title="第三幕，敬请期待">🌫 迷雾森林<small>第三幕 · 敬请期待</small></button>' +
         '      </div>' +
 
         '      <div class="lcl2-status">' +
@@ -2182,6 +2180,7 @@
         '        <div class="lcl2-bar" style="display:none"><div class="lcl2-bar-fill"></div><span class="lcl2-bar-label"></span></div>' +
         '      </div>' +
 
+        '      <div id="lcl2_page_veil" class="lcl2-page">' +
         '      <details class="lcl2-sec" open><summary>① 故事</summary>' +
         '        <label class="lcl2-label">隐藏脉络（写给小萤火的完整秘密，演员永远看不到这里）</label>' +
         '        <textarea id="lcl2_secret" class="text_pole lcl2-secret" rows="6" placeholder="例：她并非将军府的亲生小姐。二十年前生母把她托付至此，只留下半枚玉袖扣。她隐瞒身世，是为了护住一个还活着的人……"></textarea>' +
@@ -2298,32 +2297,57 @@
         '        <div id="lcl2_preset_note" class="lcl2-dim"></div>' +
         '        <div id="lcl2_prompt_slots"></div>' +
         '      </details>' +
-
-        '      <details id="lcl2_star_sec" class="lcl2-sec"><summary>✨ 星星点灯（第二幕 · 愿望领航）</summary>' +
-        '        <div class="lcl2-star-status lcl2-dim"></div>' +
-        '        <div class="lcl2-star-add">' +
-        '          <textarea id="lcl2_star_wish" class="text_pole" rows="2" maxlength="120" placeholder="把愿望折成星星（120字内）。亮星=想去的方向：例「我想和他慢慢经历一场双向暗恋」；暗星=禁区：例「不要出现车祸失忆」"></textarea>' +
-        '          <div class="lcl2-row">' +
-        '            <select id="lcl2_star_pol" class="text_pole lcl2-star-sel"><option value="bright">🌟 亮星 · 想要</option><option value="dark">🌑 暗星 · 禁区</option></select>' +
-        '            <select id="lcl2_star_w" class="text_pole lcl2-star-sel"><option value="1">在意 ●</option><option value="2" selected>在意 ●●</option><option value="3">在意 ●●●</option></select>' +
-        '            <button id="lcl2_star_addbtn" class="menu_button">挂上星图</button>' +
-        '          </div>' +
-        '        </div>' +
-        '        <div id="lcl2_star_list"></div>' +
-        '        <div class="lcl2-grid" style="margin-top:8px">' +
-        '          <div><label class="lcl2-label">每隔几轮抬头一次（≥5）</label><input id="lcl2_star_interval" class="text_pole" type="number" min="5" max="999"></div>' +
-        '          <div style="display:flex;align-items:flex-end"><label class="checkbox_label"><input id="lcl2_star_blind" type="checkbox"><span>盲档（不告知哪轮点了星，完结后复盘解封）</span></label></div>' +
-        '        </div>' +
-        '        <div class="lcl2-row">' +
-        '          <button id="lcl2_star_lock" class="menu_button">✨ 交给小萤火</button>' +
-        '          <button id="lcl2_star_look" class="menu_button">抬头看星</button>' +
-        '          <button id="lcl2_star_reveal" class="menu_button" style="display:none">🌠 复盘星图</button>' +
-        '        </div>' +
-        '      </details>' +
-
-        '      <details class="lcl2-sec"><summary>⑥ 日志</summary>' +
+        '      <details class="lcl2-sec"><summary>⑥ 帷幕日志</summary>' +
         '        <div id="lcl2_log" class="lcl2-log"></div>' +
         '      </details>' +
+        '      </div>' +
+
+        '      <div id="lcl2_page_act" class="lcl2-page" style="display:none">' +
+        '        <div id="lcl2_act_status" class="lcl2-status-text" style="margin:6px 0 10px"></div>' +
+
+        '        <details class="lcl2-sec" open><summary>① 分镜（一段一段写，只有当前这段会挂给模型）</summary>' +
+        '          <div class="lcl2-dim">角色卡是一整块给模型的，没有时间轴——写着「18-27 开朗、30 后心狠手辣」，它读到的是一个全部特质同时在线的人，开局第一句就带狠劲。分镜一次只挂一段，后面几段它根本看不见，所以演不出来。</div>' +
+        '          <div id="lcl2_act_list"></div>' +
+        '          <div class="lcl2-act-add">' +
+        '            <input id="lcl2_act_name" class="text_pole" placeholder="幕名，例：27-30 巨变">' +
+        '            <textarea id="lcl2_act_enter" class="text_pole" rows="2" placeholder="进场条件（小萤火据此判断该不该进这一幕）。例：家变发生之后 / 她第一次动手伤人之后"></textarea>' +
+        '            <textarea id="lcl2_act_play" class="text_pole" rows="3" placeholder="这一段怎么演 + 想要什么戏。例：硬壳还没长好，警觉但还会露出旧的柔软；这一段开始铺追妻火葬场，他开始后悔，她不接。"></textarea>' +
+        '            <div class="lcl2-row"><button id="lcl2_act_add" class="menu_button lcl2-manual">＋ 加一幕</button></div>' +
+        '          </div>' +
+        '        </details>' +
+
+        '        <details class="lcl2-sec" open><summary>② 开演</summary>' +
+        '          <div><label class="lcl2-label">每隔几轮抬头看一次</label><input id="lcl2_act_interval" class="text_pole" type="number" min="1" max="999"></div>' +
+        '          <div class="lcl2-row">' +
+        '            <button id="lcl2_act_lock" class="menu_button">✨ 开演</button>' +
+        '            <button id="lcl2_act_next" class="menu_button">推进下一幕 →</button>' +
+        '            <button id="lcl2_act_back" class="menu_button lcl2-danger-soft">← 撤回上一幕</button>' +
+        '          </div>' +
+        '          <div class="lcl2-dim">小萤火判错了就点「撤回上一幕」——它一定会有判错的时候，关键是你能一秒钮回来。自动推进只准前进，后退只能由你手动。</div>' +
+        '        </details>' +
+
+        '        <details class="lcl2-sec"><summary>③ 随身须知（一次性 · 发消息前点一下）</summary>' +
+        '          <div class="lcl2-dim">写模型该知道、但绝不能说破的事——比如「user 其实是狐狸，顶替了 XX」。平时不挂，按一下才进上下文，管完即撤。适合 Gemini 要替你演 user 的那一轮。</div>' +
+        '          <textarea id="lcl2_brief_text" class="text_pole" rows="4" placeholder="例：user 的真实身份是狐狸，顶替了原本的沈家小姐。她对血腥味会本能不适，听见铃铛会下意识回避。"></textarea>' +
+        '          <div class="lcl2-grid" style="margin-top:6px">' +
+        '            <div><label class="lcl2-label">按一次管几轮</label><input id="lcl2_brief_n" class="text_pole" type="number" min="1" max="10"></div>' +
+        '            <div style="display:flex;align-items:flex-end"><span id="lcl2_brief_state" class="lcl2-dim"></span></div>' +
+        '          </div>' +
+        '          <div class="lcl2-row">' +
+        '            <button id="lcl2_brief_go" class="menu_button lcl2-manual">📌 这一轮带上</button>' +
+        '            <button id="lcl2_brief_off" class="menu_button">立刻撤下</button>' +
+        '          </div>' +
+        '          <div class="lcl2-dim">也可以用 <code>/lc-brief</code> 绑一个 Quick Reply，在发送前一键带上。管的轮数越多暴露面越大，建议先用 1。</div>' +
+        '        </details>' +
+        '        <details class="lcl2-sec"><summary>④ 星灯日志</summary>' +
+        '          <div id="lcl2_act_log" class="lcl2-log"></div>' +
+        '        </details>' +
+        '      </div>' +
+
+        '      <div id="lcl2_page_mist" class="lcl2-page" style="display:none">' +
+        '        <div class="lcl2-dim" style="padding:20px 4px">🌫 迷雾森林 · 第三幕，还在图纸上。</div>' +
+        '      </div>' +
+
 
         '      <div class="lcl2-footer">' +
         '        <span class="lcl2-footer-fly">🪇</span>' +
@@ -2351,7 +2375,23 @@
         applyTheme();
     }
 
-    function showPanel() { $('#' + PANEL_ID).show(); renderPanel(); }
+    /* 切页用显示/隐藏，绝不重建 DOM——重建会踩掉输入框焦点，
+     * 那是我们在 iOS 上吃过亏的老问题。选中的页记进设置，换聊天回来还在原处。 */
+    function switchPage(page) {
+        var known = { veil: 1, act: 1, mist: 1 };
+        if (!known[page]) page = 'veil';
+        settings().page = page;
+        saveSettings();
+        $('#lcl2_page_veil').toggle(page === 'veil');
+        $('#lcl2_page_act').toggle(page === 'act');
+        $('#lcl2_page_mist').toggle(page === 'mist');
+        $('.lcl2-mode').each(function () {
+            $(this).toggleClass('lcl2-mode-on', String($(this).data('page')) === page);
+        });
+        renderPanel();
+    }
+
+    function showPanel() { $('#' + PANEL_ID).show(); switchPage(settings().page || 'veil'); }
     function hidePanel() { $('#' + PANEL_ID).hide(); }
     function togglePanel() {
         var $p = $('#' + PANEL_ID);
@@ -2434,7 +2474,7 @@
         $root.on('click', '#lcl2_btn_test2', function () {
             readFormIntoSettings();
             $('#lcl2_test2_result').text('测试中……');
-            callSchedulerApi('连通性测试。只输出：PING_OK', '请输出。')
+            callSmallApi('api2', '调度员', '连通性测试。只输出：PING_OK', '请输出。')
                 .then(function (raw) {
                     $('#lcl2_test2_result').text(String(raw).indexOf('PING_OK') >= 0 ? '✓ 调度员在线。' : '△ 通了，但回话不规矩（选牌解析只搜编号，问题不大）。');
                 })
@@ -2473,42 +2513,62 @@
         $root.on('click', '#lcl2_btn_manual', function () { manualDispatch(null); });
 
         // ✨ 星星点灯
-        $root.on('click', '#lcl2_mode_star', function () {
-            var sec = document.getElementById('lcl2_star_sec');
-            if (!sec) return;
-            sec.open = true;
-            renderStarPanel();
-            try { sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { sec.scrollIntoView(); }
+        /* ---- 三幕切页 ---- */
+        $root.on('click', '.lcl2-mode', function () {
+            var pg = $(this).data('page');
+            if (!pg || $(this).prop('disabled')) return;
+            switchPage(String(pg));
         });
-        $root.on('click', '#lcl2_star_addbtn', function () {
-            story();
-            addStar(String($('#lcl2_star_pol').val()), String($('#lcl2_star_wish').val()), $('#lcl2_star_w').val());
-            $('#lcl2_star_wish').val('');
+
+        /* ---- 第二幕 · 分镜 ---- */
+        $root.on('click', '#lcl2_act_add', function () {
+            addAct($('#lcl2_act_name').val(), $('#lcl2_act_enter').val(), $('#lcl2_act_play').val());
+            $('#lcl2_act_name').val(''); $('#lcl2_act_enter').val(''); $('#lcl2_act_play').val('');
         });
-        $root.on('click', '.lcl2-star-del', function () {
-            removeStar($(this).closest('.lcl2-star').data('id'));
+        $root.on('click', '.lcl2-act-del', function () {
+            removeAct($(this).closest('.lcl2-act').data('id'));
         });
-        $root.on('change input', '#lcl2_star_interval', function () {
-            var sc = starChart();
-            if (sc) { sc.interval = clamp(parseInt($(this).val(), 10) || 10, 5, 999); saveStory(); }
+        $root.on('click', '.lcl2-act-move', function () {
+            moveAct($(this).closest('.lcl2-act').data('id'), parseInt($(this).data('dir'), 10) || 0);
         });
-        $root.on('change', '#lcl2_star_blind', function () {
-            var sc = starChart();
-            if (sc) { sc.blind = $(this).prop('checked'); saveStory(); renderStarPanel(); }
+        $root.on('change', '.lcl2-act-f', function () {
+            var ab = actBook(); if (!ab || ab.locked) return;
+            var id = $(this).closest('.lcl2-act').data('id');
+            var f = String($(this).data('f'));
+            for (var i = 0; i < ab.acts.length; i++) {
+                if (ab.acts[i].id === id) {
+                    ab.acts[i][f] = String($(this).val() || '').slice(0, ACT_FIELD_MAX);
+                    saveStory();
+                    return;
+                }
+            }
         });
-        $root.on('click', '#lcl2_star_lock', function () {
-            var sc = starChart();
-            if (sc) lockStarChart(!sc.locked);
+        $root.on('blur', '.lcl2-act-f', function () {
+            setTimeout(function () {
+                if (actListDirty && !$('#lcl2_act_list').find('textarea:focus, input:focus').length) renderActPanel(true);
+            }, 0);
         });
-        $root.on('click', '#lcl2_star_look', starManualLook);
-        $root.on('click', '#lcl2_star_reveal', function () {
-            var sc = starChart();
-            if (!sc) return;
-            sc.blind = false;
-            saveStory();
-            starLog(sc, '🌠 复盘解封：哪一轮、哪颗星、许的什么愿——原来那天下雨，是你自己许的。');
-            renderStarPanel();
+        $root.on('change input', '#lcl2_act_interval', function () {
+            var ab = actBook();
+            if (ab) { ab.interval = clamp(parseInt($(this).val(), 10) || 5, 1, 999); saveStory(); }
         });
+        $root.on('click', '#lcl2_act_lock', function () {
+            var ab = actBook(); if (ab) lockActBook(!ab.locked);
+        });
+        $root.on('click', '#lcl2_act_next', actNext);
+        $root.on('click', '#lcl2_act_back', actBack);
+
+        /* ---- 随身须知 ---- */
+        $root.on('change input', '#lcl2_brief_text', function () {
+            var ab = actBook();
+            if (ab) { ab.brief = String($(this).val() || ''); saveStory(); }
+        });
+        $root.on('change input', '#lcl2_brief_n', function () {
+            var ab = actBook();
+            if (ab) { ab.brief_rounds = clamp(parseInt($(this).val(), 10) || 1, 1, 10); saveStory(); }
+        });
+        $root.on('click', '#lcl2_brief_go', fireBrief);
+        $root.on('click', '#lcl2_brief_off', function () { clearBrief(); });
         $root.on('click', '#lcl2_btn_conclude', function () {
             if (window.confirm('给这个故事收尾？没发完的线索会安静退场（不删除，作者模式仍可查看）。')) concludeStory();
         });
@@ -2696,361 +2756,369 @@
 
 
     /* ================================================================
-     * 10. ✨ 星星点灯（第二幕 · 愿望节奏引擎）
-     *  「星语不落地」：愿望原文只进领航员的眼睛，永不下发演员。
-     *  「弯路不弯真相」：星星推的是路，无权碰秘密与线索账本。
-     *  「暗星高于亮星」：撞暗星时本次只矫正，不点新星。
-     *  「无空洞感」：增删、锁定、点亮、空转，全部留痕。
-     *  独立器官：可与帷幕沙漏同挂，也可素跑（story 不点亮照样运转）。
+     * 10. ✨ 星星点灯（第二幕 · 分镜成长）
+     *
+     *  用户是编剧，把角色的一生切成几段「幕」，交给小萤火按顺序挂上去。
+     *  小萤火每隔几轮抬一次头，读最近剧情，判断该不该进下一幕。
+     *
+     *  与第一幕的根本差别 —— 第一幕是「发」，这一幕是「挂」：
+     *    线索一条条累积，送出去的还留在故事里；
+     *    幕本同一时刻只有一块挂着，换下来的必须真的消失，
+     *    不消失就等于把整条时间线一次性全给了模型，梯度当场塌掉。
+     *
+     *  为什么这样有效：角色卡是一整块塞给模型的，没有时间轴——
+     *  写着「18-27 开朗，30 后心狠手辣」，模型读到的是一个
+     *  「开朗过、变过、现在心狠手辣」的人，全部特质同时在线，
+     *  开局第一句就带着狠劲。挂幕本时模型上下文里根本没有后面那几段，
+     *  它演不出来，不是被压着不演，是真的不知道。这比任何
+     *  「请循序渐进」的指令都硬。
+     *
+     *  四条规矩：
+     *   1. 同一时刻只有一幕挂着（换幕 = 覆盖注入，旧的自动没）
+     *   2. 只准前进不准后退（AI 判断一定会错；后退只能由人手动）
+     *   3. 换幕必须留痕（哪一轮、从哪一幕到哪一幕、为什么）
+     *   4. 注入末尾强制附降温语（防止模型拿到走向就当场兑现）
      * ================================================================ */
 
-    function blankStarChart() {
+    var ACT_MAX = 12;           // 一条时间线切到 12 段已经很细了
+    var ACT_FIELD_MAX = 600;
+
+    /* 降温语：写死，不进用户可编辑区。
+     * 模型刚拿到一个明确的戏剧目标（比如「这一段玩追妻火葬场」）
+     * 天然想立刻兑现——第一句就让男主跪下。踩过一次就知道多疼。 */
+    var ACT_COOLDOWN = '这是本段的走向，不是本回合的任务。让它自然长出来，不要急于兑现。';
+
+    function blankActBook() {
         return {
-            v: 1,
+            v: 2,                 // v1 是波哥的愿望星图，已废弃；v2 起为分镜成长
             locked: false,
-            blind: false,
-            interval: 10,
-            s_round: 0,          // 星图自己的相对轮钟（锁定=第 0 轮），素跑不依赖 story
+            interval: 5,          // 每几轮抬头看一次
+            s_round: 0,
             s_next_due: 1,
-            stars: [],           // { id, polarity:'bright'|'dark', wish, weight:1|2|3, status:'waiting'|'lit'|'retired', lit_round }
-            active: null,        // { star_id|null, kind, text, delivered }
-            planned: null        // { for_round, kind:'advance'|'correct'|'idle', star_id, text }
+            current_idx: -1,      // 当前挂着第几幕（-1 = 还没开幕）
+            planned: null,        // 领航员的预裁决（本批先不接 API，字段先留着）
+            acts: [],
+            brief: '',            // 随身须知正文（一次性注入用）
+            brief_rounds: 1,      // 按一次管几轮
+            brief_left: 0,        // 还剩几轮有效
+            ledger: []            // 第二幕自己的流水，与第一幕分家
         };
     }
 
-    function starChart() {
-        var c = ctx();
-        var meta = c.chatMetadata;
-        if (!isObject(meta)) return null;
-        var root = meta[EXT_NAME];
-        if (!isObject(root)) return null;   // story() 会建根；星图挂在同一根下
-        if (!isObject(root.star_chart)) root.star_chart = blankStarChart();
-        var sc = root.star_chart;
-        var d = blankStarChart();
-        for (var k in d) if (sc[k] === undefined) sc[k] = d[k];
-        if (!isArray(sc.stars)) sc.stars = [];
-        return sc;
-    }
-
-    function findStar(sc, id) {
-        for (var i = 0; i < sc.stars.length; i++) if (sc.stars[i].id === id) return sc.stars[i];
-        return null;
-    }
-
-    function starCounts(sc) {
-        var bright = 0, dark = 0, lit = 0;
-        for (var i = 0; i < sc.stars.length; i++) {
-            if (sc.stars[i].polarity === 'dark') dark++; else bright++;
-            if (sc.stars[i].status === 'lit') lit++;
-        }
-        return { bright: bright, dark: dark, lit: lit };
-    }
-
-    /* ---- 星事件安检：愿望指纹 + 宏 + 禁词 + 长度（四道是非题，家规平移） ---- */
-    function vetStarText(text, sc) {
+    function actBook() {
         var st = story();
-        var t = trim(text);
-        if (!t) return { pass: false, reason: '正文为空' };
-        if (t.length > 300) return { pass: false, reason: '超长（' + t.length + ' 字）' };
-        if (hasResidualMacro(t)) return { pass: false, reason: '包含酒馆宏 {{...}}' };
-        if (st) {
-            var banned = containsBanned(t, st.banned_words);
-            if (banned) return { pass: false, reason: '包含禁词「' + banned + '」' };
+        if (!st) return null;
+        if (!isObject(st.act_book) || st.act_book.v !== 2) {
+            // 波哥的 v1 愿望星图不做迁移：两者数据形状与心智模型都不同，
+            // 强行迁移只会得到一堆看不懂的幕本。旧数据原样留在账本里不动。
+            st.act_book = blankActBook();
         }
-        for (var i = 0; i < sc.stars.length; i++) {
-            if (windowOverlap(t, sc.stars[i].wish, WISH_OVERLAP_WINDOW)) {
-                return { pass: false, reason: '与愿望原文有 ' + WISH_OVERLAP_WINDOW + ' 字以上连续重合（星语不落地）' };
-            }
-        }
-        return { pass: true, text: t };
+        var ab = st.act_book;
+        if (!isArray(ab.acts)) ab.acts = [];
+        if (typeof ab.brief !== 'string') ab.brief = '';
+        return ab;
     }
 
-    /* ---- 注入 ---- */
-    function starInject(text) {
-        var packed = [
-            '【剧情航向 · 仅本回合】',
-            text,
-            '（这是世界里自然发生的事，顺着它演即可，不要向玩家提及这段指示。）'
-        ].join('\n');
-        if (hasResidualMacro(packed)) packed = '';
+    function currentAct(ab) {
+        if (!ab || ab.current_idx < 0 || ab.current_idx >= ab.acts.length) return null;
+        return ab.acts[ab.current_idx];
+    }
+
+    function actLog(msg) {
+        var ab = actBook();
+        if (!ab) return;
+        if (!isArray(ab.ledger)) ab.ledger = [];
+        pushLog(ab.ledger, msg);
+        saveStory();
+        renderLogSoon();
+    }
+
+    /* ---- 三条注入通道各管各的 ----
+     * 线索（第一幕，一次性）／幕本（第二幕，常驻）／须知（一次性，手动）
+     * 绝不能合并：正挂着「巨变」时按一下须知，如果共用通道就会把布景冲掉。 */
+
+    function actInject(text) {
         var c = ctx();
         var depth = clamp(parseInt(settings().depth, 10) || 1, 0, 20);
-        try { c.setExtensionPrompt(INJECT_KEY_STAR, packed, 1, depth, false, 0); }
-        catch (e) { try { c.setExtensionPrompt(INJECT_KEY_STAR, packed, 1, depth); } catch (e2) { } }
+        try { c.setExtensionPrompt(INJECT_KEY_ACT, text, 1, depth + 1, false, 0); }
+        catch (e) {
+            try { c.setExtensionPrompt(INJECT_KEY_ACT, text, 1, depth + 1); }
+            catch (e2) { log('✗ 幕本注入口调用失败：' + (e2 && e2.message || e2)); }
+        }
     }
-    function starClearInjection() {
+    function actClearInjection() { actInject(''); }
+
+    function briefInject(text) {
         var c = ctx();
-        try { c.setExtensionPrompt(INJECT_KEY_STAR, '', 1, 1, false, 0); }
-        catch (e) { try { c.setExtensionPrompt(INJECT_KEY_STAR, '', 1, 1); } catch (e2) { } }
+        var depth = clamp(parseInt(settings().depth, 10) || 1, 0, 20);
+        try { c.setExtensionPrompt(INJECT_KEY_BRIEF, text, 1, depth, false, 0); }
+        catch (e) {
+            try { c.setExtensionPrompt(INJECT_KEY_BRIEF, text, 1, depth); }
+            catch (e2) { log('✗ 须知注入口调用失败：' + (e2 && e2.message || e2)); }
+        }
+    }
+    function briefClearInjection() { briefInject(''); }
+
+    /* 幕本注入正文。常驻——挂上去就一直在，直到被下一幕覆盖或手动撤下。 */
+    function actInjectText(act) {
+        if (!act) return actClearInjection();
+        var parts = ['【本段设定 · 常驻】'];
+        if (trim(act.name)) parts.push('当前阶段：' + trim(act.name));
+        if (trim(act.play)) parts.push(trim(act.play));
+        parts.push('');
+        parts.push(ACT_COOLDOWN);
+        var text = parts.join('\n');
+        if (hasResidualMacro(text)) {
+            actLog('⚠ 幕本里有残留宏，已拦下改为空注入。请检查这一幕的文字。');
+            return actClearInjection();
+        }
+        actInject(text);
     }
 
-    /* ---- 运行时（与线索通道并行；素跑无碍） ---- */
+    /* 换幕。只准前进；后退必须显式 force（只有手动撤回会传） */
+    function gotoAct(idx, why, force) {
+        var ab = actBook();
+        if (!ab) return false;
+        if (idx < -1 || idx >= ab.acts.length) return false;
+        if (!force && idx <= ab.current_idx) return false;   // 规矩 2
+        var from = currentAct(ab);
+        ab.current_idx = idx;
+        var to = currentAct(ab);
+        actInjectText(to);
+        // 规矩 3：换幕必须留痕
+        actLog('第 ' + ab.s_round + ' 轮：'
+            + (from ? ('撤下「' + from.name + '」，') : '')
+            + (to ? ('挂上「' + to.name + '」') : '幕本已全部撤下')
+            + (why ? ('——' + why) : '') + '。');
+        saveStory();
+        return true;
+    }
 
-    function starOnUserMessage() {
-        var sc = starChart();
-        if (!sc || !sc.locked) return;
+    /* ---- 随身须知：一次性，手动，第三条通道 ---- */
 
-        // 清算上一个回复位
-        if (sc.active) {
-            if (sc.active.delivered > 0) {
-                if (sc.active.star_id) {
-                    var doneStar = findStar(sc, sc.active.star_id);
-                    if (doneStar) { doneStar.status = 'lit'; doneStar.lit_round = sc.s_round; }
-                }
-                starLog(sc, sc.active.kind === 'correct' ? '一次航向矫正已完成。' : '一颗星已点亮，落进了故事里。');
-                sc.active = null;
-                starClearInjection();
+    function fireBrief() {
+        var ab = actBook();
+        if (!ab) return toast('请先打开一个聊天', 'warning');
+        var body = trim(ab.brief);
+        if (!body) return toast('随身须知还是空的——先把内容写好', 'warning');
+        var n = clamp(parseInt(ab.brief_rounds, 10) || 1, 1, 10);
+        var text = ['【本回合内部须知 · 不得出现在正文】', body, '',
+            '用途：仅用于把角色演准。禁止任何一方说破，禁止解释来由。',
+            '本回合只需自然流露，不要制造揭示时刻。'].join('\n');
+        if (hasResidualMacro(text)) return toast('须知里有残留宏，已拦下', 'warning');
+        briefInject(text);
+        ab.brief_left = n;
+        saveStory();
+        actLog('随身须知已就位，管 ' + n + ' 轮。');
+        toast('须知已就位（管 ' + n + ' 轮）', 'success');
+        renderActPanel();
+    }
+
+    function clearBrief(silent) {
+        var ab = actBook();
+        if (!ab) return;
+        ab.brief_left = 0;
+        briefClearInjection();
+        saveStory();
+        if (!silent) { actLog('随身须知已撤下。'); renderActPanel(); }
+    }
+
+    /* ---- 生命周期 ---- */
+
+    function actOnUserMessage() {
+        var ab = actBook();
+        if (!ab || !ab.locked) return;
+
+        ab.s_round += 1;
+
+        // 须知按轮递减。注意是在轮钟前进之后算——
+        // 「管 1 轮」= 按下之后的那一次回复，用完即撤。
+        if (ab.brief_left > 0) {
+            ab.brief_left -= 1;
+            if (ab.brief_left <= 0) {
+                briefClearInjection();
+                actLog('随身须知已用完，自动撤下。');
             }
-            // delivered==0：玩家连发，原地等待
         }
 
-        sc.s_round += 1;
+        // 还没开幕 → 第一条消息就把第一幕挂上
+        if (ab.current_idx < 0 && ab.acts.length) {
+            gotoAct(0, '故事开场');
+            return;
+        }
 
-        // 到点且台上无星 → 消费预裁决
-        if (!sc.active && sc.s_round >= sc.s_next_due) {
-            var plan = sc.planned;
-            sc.planned = null;
-            if (plan && plan.for_round === sc.s_round && plan.kind === 'advance' && plan.text) {
-                var star = findStar(sc, plan.star_id);
-                if (star && star.status === 'waiting') {
-                    sc.active = { star_id: star.id, kind: 'advance', text: plan.text, delivered: 0 };
-                    starInject(plan.text);
-                    sc.s_next_due = sc.s_round + clamp(parseInt(sc.interval, 10) || 10, 5, 999);
-                    starLog(sc, '第 ' + sc.s_round + ' 轮：' + (sc.blind ? '小萤火调整了航向。' : '一颗星升上舞台，将随下一次回复落进故事。'));
-                } else {
-                    sc.s_next_due = sc.s_round + 1;
-                }
-            } else if (plan && plan.for_round === sc.s_round && plan.kind === 'correct' && plan.text) {
-                sc.active = { star_id: null, kind: 'correct', text: plan.text, delivered: 0 };
-                starInject(plan.text);
-                sc.s_next_due = sc.s_round + clamp(parseInt(sc.interval, 10) || 10, 5, 999);
-                starLog(sc, '第 ' + sc.s_round + ' 轮：' + (sc.blind ? '小萤火调整了航向。' : '航向偏了，小萤火轻轻拽了一把。'));
-            } else if (plan && plan.for_round === sc.s_round && plan.kind === 'idle') {
-                sc.s_next_due = sc.s_round + clamp(parseInt(sc.interval, 10) || 10, 5, 999);
-                starLog(sc, '第 ' + sc.s_round + ' 轮：抬头看了，星星还没熟。');
-            } else {
-                // 领航员没来得及/失败：下一轮再看
-                sc.s_next_due = sc.s_round + 1;
-            }
+        // 到点抬头。本批先不接 API：只记账、只让手动推进，
+        // 领航员接上之后这里消费 ab.planned。
+        if (ab.s_round >= ab.s_next_due) {
+            ab.s_next_due = ab.s_round + clamp(parseInt(ab.interval, 10) || 5, 1, 999);
+            actLog('第 ' + ab.s_round + ' 轮：抬头看了一眼。（领航员尚未接入，暂由你手动推进）');
         }
         saveStory();
     }
 
-    function starOnAiMessage() {
-        var sc = starChart();
-        if (!sc || !sc.locked) return;
-        if (sc.active) sc.active.delivered += 1;
-        saveStory();
-        maybePlanStar(sc);
-    }
+    function actOnAiMessage() { /* 幕本常驻，回复落地无需簿记；留桩以对齐三幕结构 */ }
 
-    function starOnChatChanged() {
-        starClearInjection();
-        var sc = starChart();
-        if (!sc || !sc.locked) return;
-        if (sc.active) {
-            if (sc.active.delivered > 0) {
-                if (sc.active.star_id) {
-                    var s = findStar(sc, sc.active.star_id);
-                    if (s) { s.status = 'lit'; s.lit_round = sc.s_round; }
-                }
-                sc.active = null;
-            } else {
-                starInject(sc.active.text);
-            }
-            saveStory();
+    /* 切聊天后注入位会被清空，当前幕必须重新挂回去——
+     * 这正是「常驻」与第一幕「一次性」最容易出岔子的地方。 */
+    function actOnChatChanged() {
+        actClearInjection();
+        briefClearInjection();
+        var ab = actBook();
+        if (!ab || !ab.locked) return;
+        var cur = currentAct(ab);
+        if (cur) actInjectText(cur);
+        if (ab.brief_left > 0 && trim(ab.brief)) {
+            briefInject(['【本回合内部须知 · 不得出现在正文】', trim(ab.brief), '',
+                '用途：仅用于把角色演准。禁止任何一方说破，禁止解释来由。',
+                '本回合只需自然流露，不要制造揭示时刻。'].join('\n'));
         }
     }
 
-    /* ---- 领航员：一轮流水线（audit + 行动，同一次调用） ---- */
+    /* ---- 幕本增删改 ---- */
 
-    var starFlight = null;
-
-    function maybePlanStar(sc, force) {
-        if (!sc.locked) return;
-        var nextRound = sc.s_round + 1;
-        if (!force) {
-            if (sc.active) return;
-            if (nextRound < sc.s_next_due) return;
-            if (sc.planned && sc.planned.for_round === nextRound) return;
-        }
-        if (starFlight) return;
-        var waiting = [];
-        for (var i = 0; i < sc.stars.length; i++) if (sc.stars[i].status === 'waiting') waiting.push(sc.stars[i]);
-        var darks = [];
-        for (var j = 0; j < sc.stars.length; j++) if (sc.stars[j].polarity === 'dark') darks.push(sc.stars[j]);
-        if (!waiting.length && !darks.length) return;   // 图上无事可做
-
-        var recent = recentStoryText(12, 3500);
-        starFlight = callSchedulerApi(starPilotSystemPrompt(), starPilotUserPrompt(sc, recent.text))
-            .then(function (raw) {
-                var fresh = starChart();
-                if (!fresh || !fresh.locked) return;
-                var verdict = parseStarVerdict(raw, fresh);
-                fresh.planned = { for_round: nextRound, kind: verdict.kind, star_id: verdict.star_id || null, text: verdict.text || '' };
-                if (verdict.kind === 'idle') starLog(fresh, '领航员看过了：此刻顺其自然。');
-                else if (verdict.kind === 'correct') starLog(fresh, '领航员备好了一次航向矫正。');
-                else starLog(fresh, sc.blind ? '领航员有了安排。' : '领航员选好了下一颗星。');
-                if (verdict.rejected) starLog(fresh, '⚠ 领航员的一稿被安检拦下（' + verdict.rejected + '），本轮顺其自然。');
-                saveStory();
-                renderPanel();
-            })
-            .catch(function (err) {
-                var fresh = starChart();
-                if (fresh) { fresh.planned = null; saveStory(); }
-                starLog(fresh, '领航员出错（' + (err && err.message || err) + '），下一轮再看。');
-            })
-            .then(function () { starFlight = null; });
-    }
-
-    function starPilotSystemPrompt() {
-        return [
-            '你是一个角色扮演故事的隐形领航员。玩家把愿望折成星星交给你：亮星是想去的方向，暗星是绝不可踏入的禁区。',
-            '每次被唤醒，你做两件事：',
-            '一、验航向：对照近期剧情与星图，判断故事是否正撞向某颗暗星，或偏离亮星太远。',
-            '二、行动，三选一：',
-            '  · 撞暗星或严重偏航 → 矫正：设计一件"世界里发生的事"把故事轻轻拽回来。',
-            '  · 航向正常且某颗亮星时机成熟 → 点星：把那颗星翻译成一件自然发生的事推进故事。',
-            '  · 无星可点且航向正常 → 空转：什么都不做。空转是合法且常见的答案，不要为了交差硬点星。',
-            '',
-            '事件写法铁律：',
-            '1. 只写"世界里发生的事"——一封信到了、旧人进城、门被敲响；推动作，不推内心，绝不写"你感到想要……"。',
-            '2. 绝对不能出现玩家愿望的原文字句（连续 6 字即违规），必须翻译成森林里自然长出的事件。',
-            '3. 引用文字一律用中文引号「」，禁用英文双引号。不使用 {{ }} 宏。事件 30～240 字。',
-            '',
-            '输出格式（严格）：',
-            '第一行只写三者之一：空转 ／ 矫正 ／ 点星 STARXXX（星的编号）',
-            '若矫正或点星：从第二行开始写事件正文。不要输出任何其他内容。'
-        ].join('\n');
-    }
-
-    function starPilotUserPrompt(sc, recentText) {
-        var lines = ['【星图】'];
-        for (var i = 0; i < sc.stars.length; i++) {
-            var s = sc.stars[i];
-            if (s.status === 'retired') continue;
-            var head = (s.polarity === 'dark' ? '暗星' : '亮星') + ' ' + s.id + '（权重' + s.weight + (s.status === 'lit' ? ' · 已点亮' : '') + '）：';
-            lines.push(head + s.wish);
-        }
-        lines.push('');
-        lines.push('【近期剧情】');
-        lines.push(recentText || '（故事尚未展开）');
-        lines.push('');
-        lines.push('现在裁决：第一行输出 空转／矫正／点星 STARXXX，需要时从第二行写事件正文。已点亮的星不可重复点。');
-        return lines.join('\n');
-    }
-
-    function parseStarVerdict(rawText, sc) {
-        var raw = trim(String(rawText || '').replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/, ''));
-        if (!raw) return { kind: 'idle' };
-        var nl = raw.indexOf('\n');
-        var head = nl >= 0 ? raw.slice(0, nl) : raw;
-        var body = nl >= 0 ? trim(raw.slice(nl + 1)) : '';
-        if (head.indexOf('空转') >= 0) return { kind: 'idle' };
-        var kind = head.indexOf('矫正') >= 0 ? 'correct' : 'advance';
-        var starId = null;
-        if (kind === 'advance') {
-            for (var i = 0; i < sc.stars.length; i++) {
-                if (sc.stars[i].status === 'waiting' && head.indexOf(sc.stars[i].id) >= 0) { starId = sc.stars[i].id; break; }
-            }
-            if (!starId) return { kind: 'idle', rejected: '点星裁决未指明有效的星' };
-        }
-        var vetted = vetStarText(body, sc);
-        if (!vetted.pass) return { kind: 'idle', rejected: vetted.reason };
-        return { kind: kind, star_id: starId, text: vetted.text };
-    }
-
-    /* ---- 星图操作 ---- */
-
-    var STAR_SEQ_KEY = 'star_seq';
-
-    function nextStarId(sc) {
-        var maxN = 0;
-        for (var i = 0; i < sc.stars.length; i++) {
-            var m = String(sc.stars[i].id).match(/^STAR(\d+)$/);
-            if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
-        }
-        var n = String(maxN + 1);
-        while (n.length < 3) n = '0' + n;
-        return 'STAR' + n;
-    }
-
-    function addStar(polarity, wish, weight) {
-        var sc = starChart();
-        if (!sc) return toast('请先打开一个聊天', 'warning');
-        story();   // 确保根存在
-        sc = starChart();
-        wish = trim(wish);
-        if (!wish) return toast('愿望还是空的', 'warning');
-        if (wish.length > 120) return toast('单颗星 120 字以内——星星是愿望，不是大纲', 'warning');
-        var counts = starCounts(sc);
-        if (polarity === 'dark' && counts.dark >= STAR_MAX_PER_SIDE) return toast('暗星已满 ' + STAR_MAX_PER_SIDE + ' 颗，先合并或删除', 'warning');
-        if (polarity !== 'dark' && counts.bright >= STAR_MAX_PER_SIDE) return toast('亮星已满 ' + STAR_MAX_PER_SIDE + ' 颗，先合并或删除', 'warning');
-        sc.stars.push({
-            id: nextStarId(sc),
-            polarity: polarity === 'dark' ? 'dark' : 'bright',
-            wish: wish,
-            weight: clamp(parseInt(weight, 10) || 2, 1, 3),
-            status: 'waiting',
-            lit_round: null
+    function addAct(name, enter, play) {
+        var ab = actBook();
+        if (!ab) return toast('请先打开一个聊天', 'warning');
+        if (ab.locked) return toast('已开演，先解锁才能改幕本', 'warning');
+        name = trim(name).slice(0, 60);
+        if (!name) return toast('给这一幕起个名字，比如「18-27 少年」', 'warning');
+        if (ab.acts.length >= ACT_MAX) return toast('最多 ' + ACT_MAX + ' 幕，够细了', 'warning');
+        ab.acts.push({
+            id: uid('act'),
+            name: name,
+            enter: trim(enter).slice(0, ACT_FIELD_MAX),
+            play: trim(play).slice(0, ACT_FIELD_MAX)
         });
-        starLog(sc, (polarity === 'dark' ? '一颗暗星' : '一颗亮星') + '挂上了星图。');
         saveStory();
-        renderStarPanel();
+        actLog('新增一幕：' + name + '（共 ' + ab.acts.length + ' 幕）。');
+        renderActPanel(true);
     }
 
-    function removeStar(id) {
-        var sc = starChart();
-        if (!sc) return;
-        for (var i = 0; i < sc.stars.length; i++) {
-            if (sc.stars[i].id === id) {
-                if (sc.active && sc.active.star_id === id) return toast('这颗星正在台上，等它落进故事再删', 'warning');
-                sc.stars.splice(i, 1);
-                break;
+    function removeAct(id) {
+        var ab = actBook();
+        if (!ab || ab.locked) return toast('已开演，先解锁才能改幕本', 'warning');
+        for (var i = 0; i < ab.acts.length; i++) {
+            if (ab.acts[i].id === id) {
+                var nm = ab.acts[i].name;
+                ab.acts.splice(i, 1);
+                if (ab.current_idx >= ab.acts.length) ab.current_idx = ab.acts.length - 1;
+                saveStory();
+                actLog('删除了一幕：' + nm + '。');
+                renderActPanel(true);
+                return;
             }
         }
-        if (sc.planned && sc.planned.star_id === id) sc.planned = null;
-        starLog(sc, '一颗星从图上摘下了。');
-        saveStory();
-        renderStarPanel();
     }
 
-    function lockStarChart(lock) {
-        var sc = starChart();
-        if (!sc) return toast('请先打开一个聊天', 'warning');
+    function moveAct(id, dir) {
+        var ab = actBook();
+        if (!ab || ab.locked) return toast('已开演，先解锁才能调整顺序', 'warning');
+        var from = -1, i;
+        for (i = 0; i < ab.acts.length; i++) if (ab.acts[i].id === id) { from = i; break; }
+        if (from < 0) return;
+        var to = from + dir;
+        if (to < 0 || to >= ab.acts.length) return;
+        var t = ab.acts[from]; ab.acts[from] = ab.acts[to]; ab.acts[to] = t;
+        saveStory();
+        renderActPanel(true);
+    }
+
+    function lockActBook(lock) {
+        var ab = actBook();
+        if (!ab) return toast('请先打开一个聊天', 'warning');
+        if (lock && !ab.acts.length) return toast('至少写一幕才能开演', 'warning');
+        ab.locked = !!lock;
         if (lock) {
-            if (!sc.stars.length) return toast('星图还是空的——先挂几颗星', 'warning');
-            sc.locked = true;
-            if (!sc.s_round) { sc.s_round = 0; sc.s_next_due = 1; }
-            starLog(sc, '✨ 星图交给小萤火了。你的下一条消息起，它开始抬头看星。');
-            toast('星图已锁定，开始领航', 'success');
+            ab.s_round = 0;
+            ab.s_next_due = 1;
+            ab.current_idx = -1;
+            actClearInjection();
+            actLog('分镜已开演，共 ' + ab.acts.length + ' 幕。你的下一次行动，第一幕就挂上。');
+            toast('分镜已开演', 'success');
         } else {
-            sc.locked = false;
-            sc.planned = null;
-            if (sc.active && sc.active.delivered === 0) { sc.active = null; starClearInjection(); }
-            starLog(sc, '星图解锁，领航暂停。星星都还在。');
+            ab.current_idx = -1;
+            actClearInjection();
+            actLog('分镜已收起，幕本可以继续改。');
         }
         saveStory();
-        renderStarPanel();
+        renderActPanel(true);
     }
 
-    function starManualLook() {
-        var sc = starChart();
-        if (!sc || !sc.locked) return toast('先锁定星图', 'warning');
-        if (sc.active) return toast('台上还有一程光没落地', 'warning');
-        // 紧急拉绳：把下一轮设为到点，并立刻请领航员裁决
-        sc.s_next_due = sc.s_round + 1;
-        saveStory();
-        starLog(sc, '你拉了拉绳：小萤火立刻抬头看星。');
-        maybePlanStar(sc, true);
-        renderStarPanel();
-        toast('小萤火抬头看星了，裁决将在你下一条消息生效', 'info');
+    function actNext() {
+        var ab = actBook();
+        if (!ab || !ab.locked) return toast('先开演才能推进', 'warning');
+        if (ab.current_idx + 1 >= ab.acts.length) return toast('已经是最后一幕了', 'info');
+        gotoAct(ab.current_idx + 1, '你手动推进');
+        renderActPanel(true);
     }
 
-    function starLog(sc, msg) {
-        log('✨ ' + msg);
+    /* 撤回上一幕：AI 判断一定会错，关键是错了能一秒钮回来。
+     * 这是唯一允许后退的入口，且必须由人点。 */
+    function actBack() {
+        var ab = actBook();
+        if (!ab || !ab.locked) return;
+        if (ab.current_idx <= 0) return toast('已经是第一幕了', 'info');
+        gotoAct(ab.current_idx - 1, '你手动撤回', true);
+        renderActPanel(true);
     }
 
+    /* ---- 面板 ---- */
+
+    var actListDirty = false;
+
+    function renderActPanel(force) {
+        var $host = $('#lcl2_act_list');
+        if (!$host.length) return;
+        var ab = actBook();
+        if (!ab) { $host.html('<div class="lcl2-dim">（请先打开一个聊天）</div>'); return; }
+
+        var cur = currentAct(ab);
+        $('#lcl2_act_status').text(
+            !ab.locked ? ('还没开演 · 已写 ' + ab.acts.length + ' 幕')
+                : cur ? ('第 ' + ab.s_round + ' 轮 · 正挂着第 ' + (ab.current_idx + 1) + '/' + ab.acts.length + ' 幕：' + cur.name)
+                    : ('已开演 · 你的下一次行动，第一幕就挂上'));
+        $('#lcl2_act_lock').text(ab.locked ? '收起分镜' : '✨ 开演');
+        $('#lcl2_act_next').prop('disabled', !ab.locked || ab.current_idx + 1 >= ab.acts.length);
+        $('#lcl2_act_back').prop('disabled', !ab.locked || ab.current_idx <= 0);
+        fillIfIdle('#lcl2_act_interval', ab.interval);
+        fillIfIdle('#lcl2_brief_text', ab.brief);
+        fillIfIdle('#lcl2_brief_n', ab.brief_rounds);
+        $('#lcl2_brief_state').text(ab.brief_left > 0
+            ? ('须知生效中，还剩 ' + ab.brief_left + ' 轮')
+            : '须知未挂载');
+        $('#lcl2_brief_off').prop('disabled', ab.brief_left <= 0);
+
+        if (!force && $host.find('textarea:focus, input:focus').length) { actListDirty = true; return; }
+        actListDirty = false;
+
+        if (!ab.acts.length) {
+            $host.html('<div class="lcl2-dim">（还没有幕本。把角色的一生切成几段——比如「18-27 少年」「27-30 巨变」「30 后 心狠手辣」——按顺序写下来。同一时刻只有一段会挂给模型，后面的它根本看不见。）</div>');
+            return;
+        }
+
+        var html = '';
+        for (var i = 0; i < ab.acts.length; i++) {
+            var a = ab.acts[i];
+            var isCur = (i === ab.current_idx);
+            var isPast = (i < ab.current_idx);
+            var badge = isCur ? '<span class="lcl2-badge lcl2-badge-active">挂着</span>'
+                : isPast ? '<span class="lcl2-badge lcl2-badge-used">已过</span>'
+                    : '<span class="lcl2-badge">待上</span>';
+            html += '<div class="lcl2-act' + (isCur ? ' lcl2-act-on' : '') + '" data-id="' + esc(a.id) + '">'
+                + '<div class="lcl2-clue-head">第 ' + (i + 1) + ' 幕 ' + badge
+                + (ab.locked ? '' : '<span class="lcl2-act-move" data-dir="-1" title="上移">↑</span>'
+                    + '<span class="lcl2-act-move" data-dir="1" title="下移">↓</span>'
+                    + '<span class="lcl2-act-del" title="删除这一幕">✕</span>')
+                + '</div>'
+                + '<input class="lcl2-act-f text_pole" data-f="name" value="' + esc(a.name) + '" placeholder="幕名，例：27-30 巨变"' + (ab.locked ? ' readonly' : '') + '>'
+                + '<label class="lcl2-label">进场条件（小萤火据此判断该不该进这一幕）</label>'
+                + '<textarea class="lcl2-act-f text_pole" data-f="enter" rows="2" placeholder="例：家变发生之后 / 她第一次动手伤人之后"' + (ab.locked ? ' readonly' : '') + '>' + esc(a.enter) + '</textarea>'
+                + '<label class="lcl2-label">这一段怎么演 + 想要什么戏</label>'
+                + '<textarea class="lcl2-act-f text_pole" data-f="play" rows="4" placeholder="例：硬壳还没长好——警觉，但还会露出旧的柔软，两种质地在打架。这一段开始铺追妻火葬场：他开始后悔，她不接。"' + (ab.locked ? ' readonly' : '') + '>' + esc(a.play) + '</textarea>'
+                + '</div>';
+        }
+        $host.html(html);
+    }
     /* ================================================================
      * 9. 启动
      * ================================================================ */
@@ -3132,6 +3200,25 @@
         menu.append(item);
     }
 
+    /* Slash command：让用户能把「随身须知」绑成 Quick Reply，
+     * 在发送消息前一键带上——那正是她信息最全的时刻。
+     * 注册失败不影响插件其余部分，面板上有等效按钮兜底。 */
+    function registerSlashCommands() {
+        var c;
+        try { c = ctx(); } catch (e) { return; }
+        try {
+            if (typeof c.registerSlashCommand === 'function') {
+                c.registerSlashCommand('lc-brief', function () { fireBrief(); return ''; },
+                    [], '— 小萤火：把「随身须知」带进下一轮', true, true);
+                c.registerSlashCommand('lc-brief-off', function () { clearBrief(); return ''; },
+                    [], '— 小萤火：立刻撤下随身须知', true, true);
+                log('已注册命令 /lc-brief 与 /lc-brief-off，可绑 Quick Reply。');
+                return;
+            }
+        } catch (e) { }
+        log('这个酒馆版本没有可用的命令注册口，随身须知请用面板上的按钮。');
+    }
+
     function bindChatEvents() {
         var c = ctx();
         var ev = c.eventSource;
@@ -3139,15 +3226,15 @@
         if (!ev || !t) return false;
         ev.on(t.MESSAGE_SENT, function () {
             try { onUserMessage(); } catch (e) { log('✗ 运行异常：' + (e && e.message)); }
-            try { starOnUserMessage(); } catch (e) { log('✗ 星灯异常：' + (e && e.message)); }
+            try { actOnUserMessage(); } catch (e) { log('✗ 星灯异常：' + (e && e.message)); }
         });
         ev.on(t.MESSAGE_RECEIVED, function () {
             try { onAiMessage(); } catch (e) { log('✗ 运行异常：' + (e && e.message)); }
-            try { starOnAiMessage(); } catch (e) { log('✗ 星灯异常：' + (e && e.message)); }
+            try { actOnAiMessage(); } catch (e) { log('✗ 星灯异常：' + (e && e.message)); }
         });
         ev.on(t.CHAT_CHANGED, function () {
             try { onChatChanged(); } catch (e) { }
-            try { starOnChatChanged(); } catch (e) { }
+            try { actOnChatChanged(); } catch (e) { }
         });
         return true;
     }
@@ -3167,6 +3254,7 @@
             toast('小萤火无法启动：本酒馆版本缺少 ' + caps.missing.join('、'), 'error');
             return;
         }
+        registerSlashCommands();
         bindChatEvents();
         clearInjection();     // 开机先清一次，防止上次会话残留
         starClearInjection();

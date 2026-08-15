@@ -637,3 +637,39 @@ body.reduced-motion .lcl2-footer-fly { animation: none; }
 }
 .lcl2-clue-move:hover, .lcl2-clue-move:active { opacity: 1; color: var(--lcl2-glow); }
 .lcl2-clue-move[data-dir="-1"] { margin-left: auto; }
+
+/* ============ 三幕切页 ============ */
+.lcl2-page { animation: lcl2-fadein .18s ease; }
+@keyframes lcl2-fadein { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .lcl2-page { animation: none; } }
+
+/* ============ 第二幕 · 分镜 ============ */
+.lcl2-act {
+    border: 1px solid var(--lcl2-line-soft);
+    border-radius: 8px;
+    padding: 8px 9px;
+    margin: 8px 0;
+}
+.lcl2-act-on {
+    border-color: var(--lcl2-glow);
+    background: color-mix(in srgb, var(--lcl2-glow) 10%, transparent);
+}
+.lcl2-act-f { width: 100%; box-sizing: border-box; resize: vertical; font-size: .9em; margin-bottom: 2px; }
+.lcl2-act input.lcl2-act-f { font-weight: 600; }
+.lcl2-act-move {
+    cursor: pointer; opacity: .55; padding: 0 5px; font-size: .95em;
+    user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.lcl2-act-move[data-dir="-1"] { margin-left: auto; }
+.lcl2-act-move:hover, .lcl2-act-move:active { opacity: 1; color: var(--lcl2-glow); }
+.lcl2-act-del { cursor: pointer; opacity: .5; padding: 0 4px; }
+.lcl2-act-del:hover { opacity: 1; color: var(--lcl2-danger); }
+.lcl2-act-add {
+    border: 1px dashed var(--lcl2-line);
+    border-radius: 8px;
+    padding: 8px 9px;
+    margin-top: 10px;
+}
+.lcl2-act-add input, .lcl2-act-add textarea {
+    width: 100%; box-sizing: border-box; resize: vertical; margin-bottom: 5px; font-size: .9em;
+}

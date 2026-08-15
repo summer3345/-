@@ -1,12 +1,12 @@
 {
-    "display_name": "Luciole 2.0",
+    "display_name": "Luciole 3.0",
     "loading_order": 100,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
     "author": "江 × 波哥 Claude × 五哥 Claude × 猫g GPT",
-    "version": "2.9.0",
+    "version": "3.0.0",
     "minimum_client_version": "1.14.0",
     "homePage": ""
 }
